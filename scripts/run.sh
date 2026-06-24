@@ -57,9 +57,17 @@ esac
 
 # Shim path also resolved to absolute so it doesn't depend on
 # the runner's cwd. The bridge reads it from the per-shim env
-# var (POSTGIS_SHIM_WASM for the PostGIS bridge).
+# var. The 5th argument names the var; if absent, infer from
+# the case-dir basename (postgis* -> POSTGIS_SHIM_WASM,
+# mobilitydb* -> MOBILITYDB_SHIM_WASM, etc.).
 shim_abs="$(cd "$(dirname "$shim_path")" && pwd)/$(basename "$shim_path")"
-export POSTGIS_SHIM_WASM="$shim_abs"
+if [[ -n "${5:-}" ]]; then
+    shim_env="$5"
+else
+    base="$(basename "$case_dir")"
+    shim_env="$(printf '%s' "${base%%-*}" | tr '[:lower:]' '[:upper:]')_SHIM_WASM"
+fi
+export "$shim_env=$shim_abs"
 
 # Find all .sql / .expected pairs in case_dir.
 pass=0
@@ -105,9 +113,18 @@ for sql in "$case_dir"/*.sql; do
 
     # Strip trailing whitespace per line + trailing empty lines
     # so .expected files can be hand-edited without breaking
-    # the comparison.
+    # the comparison. Also drop bridge-emitted load-time noise
+    # (clash warnings, debug eprintln) that bleeds onto stdout
+    # via the CLI's stderr merge — `[shim-*]` is the convention
+    # the codegens use; `<crate>-duckdb-bridge:` is the legacy
+    # prefix from aggregates_rs. Tests assert on actual query
+    # output, not bridge chatter.
     norm_actual="$(mktemp -t bridge-smoke.XXXXXX.norm)"
-    sed -e 's/[[:space:]]*$//' "$actual" \
+    sed -e 's/[[:space:]]*$//' \
+        -e '/^\[shim-/d' \
+        -e '/-duckdb-bridge: /d' \
+        -e '/-sqlite-bridge: /d' \
+        "$actual" \
         | awk 'NR==1 || /./{print prev} {prev=$0} END{if(prev!="") print prev}' \
         > "$norm_actual"
     norm_expected="$(mktemp -t bridge-smoke.XXXXXX.norm)"
