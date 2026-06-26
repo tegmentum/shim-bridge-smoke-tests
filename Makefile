@@ -43,6 +43,12 @@ postgis-duckdb:
 	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
 	 SHIM_INTERFACE_DB=$(POSTGIS_INTERFACE_DB) \
 	 bash scripts/run.sh duckdb $(POSTGIS_DUCKDB_BRIDGE) $(POSTGIS_SHIM) cases/postgis
+	@if [ -d cases/postgis-duckdb-only ]; then \
+	    echo "=== postgis × duckdb (duckdb-only cases) ==="; \
+	    SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	    SHIM_INTERFACE_DB=$(POSTGIS_INTERFACE_DB) \
+	    bash scripts/run.sh duckdb $(POSTGIS_DUCKDB_BRIDGE) $(POSTGIS_SHIM) cases/postgis-duckdb-only; \
+	fi
 
 postgis-sqlite:
 	@echo "=== postgis × sqlite ==="
@@ -61,6 +67,12 @@ mobilitydb-duckdb:
 	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
 	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
 	 bash scripts/run.sh duckdb $(MOBILITYDB_DUCKDB_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb
+	@if [ -d cases/mobilitydb-duckdb-only ]; then \
+	    echo "=== mobilitydb × duckdb (duckdb-only cases) ==="; \
+	    SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	    SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
+	    bash scripts/run.sh duckdb $(MOBILITYDB_DUCKDB_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb-duckdb-only; \
+	fi
 
 mobilitydb-sqlite:
 	@echo "=== mobilitydb × sqlite ==="
