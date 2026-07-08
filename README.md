@@ -6,8 +6,9 @@
 
 End-to-end smoke test suite for DataFission shim bridges.
 Catches regressions during bridge-codegen development by
-running query suites through `sqlite3` and `duckdb` CLIs
-against generated bridges.
+running query suites through `sqlite3`, `duckdb`, and
+`ducklink` (wasm-component DuckDB host) against generated
+bridges.
 
 ## What it tests
 
@@ -24,18 +25,44 @@ the runner:
 ## Usage
 
 ```sh
-# SQLite (requires extension-enabled sqlite3, brew default works)
+# SQLite via sqlink (wasm-component host; the current default path)
 scripts/run.sh sqlite \
-    /path/to/libpostgis_sqlite_bridge.dylib \
+    /path/to/postgis-sqlink-loadable.wasm \
     /path/to/postgis-shim-composed.wasm \
     cases/postgis
 
-# DuckDB
+# DuckDB via ducklink (wasm-component host)
+DUCKLINK=~/git/ducklink/target/release/ducklink scripts/run.sh ducklink \
+    /path/to/postgis-ducklink-loadable.wasm \
+    /path/to/postgis-shim-composed.wasm \
+    cases/postgis
+
+# DuckDB via native cdylib (legacy path; the -duckdb-bridge repos
+# are archived — kept runnable for regression comparison only)
 DUCKDB=/opt/homebrew/bin/duckdb scripts/run.sh duckdb \
     /path/to/postgis_duckdb_bridge.duckdb_extension \
     /path/to/postgis-shim-composed.wasm \
     cases/postgis
 ```
+
+### Ducklink runtime prerequisites
+
+The `ducklink` target requires the ducklink host binary AND
+its two wasm components:
+
+```sh
+cd ~/git/ducklink
+cargo build --release -p ducklink-host --bin ducklink
+# Also builds ~/git/ducklink/target/wasm32-wasip2/release/{ducklink_core,ducklink_cli}.wasm
+# via the same crate's wasm workspace members.
+```
+
+The runner copies the composed loadable to a scratch
+`--extensions-dir` under its canonical extension name
+(`<ext>.wasm` — derived from the `-ducklink-loadable.wasm`
+suffix) and issues `LOAD <ext>;` inside the guest DuckDB CLI.
+No `<EXT>_SHIM_WASM` env var is needed — the shim wasm is
+already inlined into the composed loadable via `wac plug`.
 
 ## Case design
 

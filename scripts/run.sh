@@ -7,8 +7,18 @@
 # during bridge-codegen development.
 #
 # Usage:
-#   scripts/run.sh sqlite  <bridge.dylib>           <shim.wasm>  <case-dir>
-#   scripts/run.sh duckdb  <bridge.duckdb_extension> <shim.wasm>  <case-dir>
+#   scripts/run.sh sqlite    <bridge.dylib|.wasm>       <shim.wasm>  <case-dir>
+#   scripts/run.sh duckdb    <bridge.duckdb_extension>  <shim.wasm>  <case-dir>
+#   scripts/run.sh ducklink  <composed-loadable.wasm>   <shim.wasm>  <case-dir>
+#
+# `ducklink` target: bridge_path is a WAC-plug'd composed
+# loadable (bridge + shim inlined). Shim path is ignored (the
+# shim is already inside the loadable) but kept in the argv
+# shape for parity with sqlite/duckdb.
+#
+# A colon-separated bridge_path loads multiple extensions in
+# order — required for mobilitydb (postgis's GEOMETRY type must
+# register first, D5 load-order convention).
 #
 # Each <case-dir>/<name>.sql / <name>.expected file pair is one
 # test case. The script runs each .sql via the target's CLI,
@@ -91,8 +101,62 @@ case "$target" in
         loader="LOAD '$bridge_abs';"
         cli_extra="-unsigned"  # we don't sign the extension
         ;;
+    ducklink)
+        # ducklink is a wasm-component DuckDB host that embeds
+        # wasmtime. Extensions are wasm components resolved by
+        # NAME from --extensions-dir/<name>.wasm (see
+        # ducklink-host `resolve_provider_artifact` /
+        # `extension_artifact_path`). The bridge_path arg here
+        # is a WAC-plug'd composed loadable (bridge + shim
+        # inlined) — copy it into a scratch dir with the
+        # canonical extension name and let ducklink resolve.
+        cli="${DUCKLINK:-$HOME/git/ducklink/target/release/ducklink}"
+        if [[ ! -x "$cli" ]]; then
+            echo "ERROR: ducklink binary not found at $cli" >&2
+            echo "       Build with: cd ~/git/ducklink && cargo build --release -p ducklink-host --bin ducklink" >&2
+            exit 2
+        fi
+        # Scratch extensions-dir populated from the colon-separated
+        # bridge_path. Each entry's basename is stripped of the
+        # canonical `-ducklink-loadable.wasm` suffix to derive the
+        # extension NAME the guest LOAD statement uses. Chained
+        # loads (postgis + mobilitydb) each land under their own
+        # identity in this dir.
+        scratch_ext_dir="$(mktemp -d -t ducklink-ext.XXXXXX)"
+        # Ensure cleanup even if the script exits mid-loop.
+        trap 'rm -rf "$scratch_ext_dir"' EXIT
+        loader=""
+        IFS=':' read -r -a bridge_paths <<< "$bridge_path"
+        for bp in "${bridge_paths[@]}"; do
+            bp_abs="$(cd "$(dirname "$bp")" && pwd)/$(basename "$bp")"
+            bp_base="$(basename "$bp")"
+            case "$bp_base" in
+                *-ducklink-loadable.wasm)
+                    ext_name="${bp_base%-ducklink-loadable.wasm}"
+                    ;;
+                *.wasm)
+                    ext_name="${bp_base%.wasm}"
+                    ;;
+                *)
+                    base="$(basename "$case_dir")"
+                    ext_name="${base%%-*}"
+                    ;;
+            esac
+            cp "$bp_abs" "$scratch_ext_dir/$ext_name.wasm"
+            loader+="LOAD $ext_name;"$'\n'
+        done
+        # `LOAD $ext_name` (bare identifier) triggers
+        # extension_artifact_path("$ext_name") -> "$dir/$ext_name.wasm".
+        # Silence the default `jsonfns` autoload so it doesn't
+        # bleed into the query output.
+        export DUCKLINK_AUTOLOAD=""
+        # ducklink invokes an internal duckdb-cli via wasm; the
+        # `--` separates host args from guest-CLI args. `:memory:`
+        # + stdin-piped SQL mirrors how sqlite/duckdb targets run.
+        bridge_abs="$(cd "$(dirname "${bridge_paths[-1]}")" && pwd)/$(basename "${bridge_paths[-1]}")"
+        ;;
     *)
-        echo "ERROR: unknown target '$target' (want sqlite|duckdb)" >&2
+        echo "ERROR: unknown target '$target' (want sqlite|duckdb|ducklink)" >&2
         exit 2
         ;;
 esac
@@ -169,13 +233,13 @@ for sql in "$case_dir"/*.sql; do
     {
         printf '%s\n' "$loader"
         # SQLite needs `.mode list` + `.headers off` to produce
-        # canonical pipe-delimited output; DuckDB needs explicit
-        # ".mode csv".
+        # canonical pipe-delimited output; DuckDB (both native
+        # and ducklink hosts) needs explicit ".mode csv".
         case "$target" in
             sqlite)
                 printf '.mode list\n.headers off\n.separator |\n'
                 ;;
-            duckdb)
+            duckdb|ducklink)
                 printf '.mode csv\n.headers off\n'
                 ;;
         esac
@@ -183,14 +247,24 @@ for sql in "$case_dir"/*.sql; do
     } > "$sql_with_loader"
 
     actual="$(mktemp -t bridge-smoke.XXXXXX.actual)"
-    if [[ "$target" == "duckdb" ]]; then
-        # shellcheck disable=SC2086
-        "$cli" $cli_extra :memory: < "$sql_with_loader" \
-            > "$actual" 2>&1 || true
-    else
-        "$cli" :memory: < "$sql_with_loader" \
-            > "$actual" 2>&1 || true
-    fi
+    case "$target" in
+        duckdb)
+            # shellcheck disable=SC2086
+            "$cli" $cli_extra :memory: < "$sql_with_loader" \
+                > "$actual" 2>&1 || true
+            ;;
+        ducklink)
+            # ducklink guest-CLI reads stdin the same as native
+            # duckdb-cli; `--` splits host flags from guest args.
+            "$cli" --extensions-dir "$scratch_ext_dir" -- \
+                duckdb-cli :memory: < "$sql_with_loader" \
+                > "$actual" 2>&1 || true
+            ;;
+        *)
+            "$cli" :memory: < "$sql_with_loader" \
+                > "$actual" 2>&1 || true
+            ;;
+    esac
 
     # Strip trailing whitespace per line + trailing empty lines
     # so .expected files can be hand-edited without breaking

@@ -6,23 +6,28 @@
 #
 # Required artifacts (override with env vars):
 #
-#   POSTGIS_DUCKDB_BRIDGE  — postgis_duckdb_bridge.duckdb_extension
-#   POSTGIS_SQLITE_BRIDGE  — libpostgis_sqlite_bridge.dylib
+#   POSTGIS_DUCKDB_BRIDGE     — legacy native duckdb_extension (archived path)
+#   POSTGIS_SQLITE_BRIDGE     — sqlink wasm-component loadable (sqlite via sqlink-host)
+#   POSTGIS_DUCKLINK_BRIDGE   — ducklink wasm-component loadable (duckdb via ducklink-host)
 #   MOBILITYDB_DUCKDB_BRIDGE
 #   MOBILITYDB_SQLITE_BRIDGE
-#   POSTGIS_SHIM            — postgis composed shim wasm
-#   MOBILITYDB_SHIM         — mobilitydb composed shim wasm
+#   MOBILITYDB_DUCKLINK_BRIDGE
+#   POSTGIS_SHIM              — postgis composed shim wasm
+#   MOBILITYDB_SHIM           — mobilitydb composed shim wasm
 
-POSTGIS_DUCKDB_BRIDGE    ?= /tmp/postgis_duckdb_bridge.duckdb_extension
-POSTGIS_SQLITE_BRIDGE    ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm
-MOBILITYDB_DUCKDB_BRIDGE ?= /tmp/mobilitydb_duckdb_bridge.duckdb_extension
-# mobilitydb's wasm bridge needs postgis loaded first for the
+POSTGIS_DUCKDB_BRIDGE       ?= /tmp/postgis_duckdb_bridge.duckdb_extension
+POSTGIS_SQLITE_BRIDGE       ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm
+POSTGIS_DUCKLINK_BRIDGE     ?= $(HOME)/git/postgis-ducklink-bridge/postgis-ducklink-loadable.wasm
+MOBILITYDB_DUCKDB_BRIDGE    ?= /tmp/mobilitydb_duckdb_bridge.duckdb_extension
+# mobilitydb's wasm bridges need postgis loaded first for the
 # GEOMETRY type (D5 load-order convention). The colon-separated
-# path is decoded by scripts/run.sh into two sqlink_load_ext
-# calls in the listed order.
-MOBILITYDB_SQLITE_BRIDGE ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm:$(HOME)/git/mobilitydb-sqlink-bridge/mobilitydb-sqlink-loadable.wasm
-POSTGIS_SHIM             ?= /tmp/postgis-shim-composed.wasm
-MOBILITYDB_SHIM          ?= /tmp/mobilitydb-composed.wasm
+# path is decoded by scripts/run.sh into two `LOAD` statements
+# in the listed order — same convention across sqlite (sqlink)
+# and ducklink targets.
+MOBILITYDB_SQLITE_BRIDGE    ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm:$(HOME)/git/mobilitydb-sqlink-bridge/mobilitydb-sqlink-loadable.wasm
+MOBILITYDB_DUCKLINK_BRIDGE  ?= $(HOME)/git/postgis-ducklink-bridge/postgis-ducklink-loadable.wasm:$(HOME)/git/mobilitydb-ducklink-bridge/mobilitydb-ducklink-loadable.wasm
+POSTGIS_SHIM                ?= /tmp/postgis-shim-composed.wasm
+MOBILITYDB_SHIM             ?= /tmp/mobilitydb-composed.wasm
 
 # Optional preprocessor wiring. When SHIM_SQL_PREPROCESS is set,
 # scripts/run.sh pipes each case file through it (with the
@@ -32,15 +37,22 @@ SHIM_SQL_PREPROCESS      ?= $(HOME)/git/shim-sql-preprocess/target/release/shim-
 POSTGIS_INTERFACE_DB     ?= /tmp/postgis-interface.sqlite
 MOBILITYDB_INTERFACE_DB  ?= /tmp/mobilitydb-interface.sqlite
 
-.PHONY: smoke postgis mobilitydb postgis-duckdb postgis-sqlite mobilitydb-duckdb mobilitydb-sqlite
+.PHONY: smoke postgis mobilitydb \
+    postgis-duckdb postgis-sqlite postgis-ducklink \
+    mobilitydb-duckdb mobilitydb-sqlite mobilitydb-ducklink
 
 smoke: postgis mobilitydb
 	@echo ""
 	@echo "===== ALL SMOKE TESTS PASSED ====="
 
-postgis: postgis-duckdb postgis-sqlite
+# By default include the wasm-component targets (sqlite via sqlink,
+# duckdb via ducklink). The legacy native `-duckdb-` target is kept
+# runnable but no longer part of `make postgis` / `make mobilitydb`
+# — invoke it explicitly with `make postgis-duckdb` / `make
+# mobilitydb-duckdb` if you still need it.
+postgis: postgis-sqlite postgis-ducklink
 
-mobilitydb: mobilitydb-duckdb mobilitydb-sqlite
+mobilitydb: mobilitydb-sqlite mobilitydb-ducklink
 
 postgis-duckdb:
 	@echo "=== postgis × duckdb ==="
@@ -83,3 +95,27 @@ mobilitydb-sqlite:
 	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
 	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
 	 bash scripts/run.sh sqlite $(MOBILITYDB_SQLITE_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb
+
+postgis-ducklink:
+	@echo "=== postgis × ducklink ==="
+	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(POSTGIS_INTERFACE_DB) \
+	 bash scripts/run.sh ducklink $(POSTGIS_DUCKLINK_BRIDGE) $(POSTGIS_SHIM) cases/postgis
+	@if [ -d cases/postgis-duckdb-only ]; then \
+	    echo "=== postgis × ducklink (duckdb-only cases) ==="; \
+	    SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	    SHIM_INTERFACE_DB=$(POSTGIS_INTERFACE_DB) \
+	    bash scripts/run.sh ducklink $(POSTGIS_DUCKLINK_BRIDGE) $(POSTGIS_SHIM) cases/postgis-duckdb-only; \
+	fi
+
+mobilitydb-ducklink:
+	@echo "=== mobilitydb × ducklink ==="
+	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
+	 bash scripts/run.sh ducklink $(MOBILITYDB_DUCKLINK_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb
+	@if [ -d cases/mobilitydb-duckdb-only ]; then \
+	    echo "=== mobilitydb × ducklink (duckdb-only cases) ==="; \
+	    SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	    SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
+	    bash scripts/run.sh ducklink $(MOBILITYDB_DUCKLINK_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb-duckdb-only; \
+	fi
