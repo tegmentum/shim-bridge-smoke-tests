@@ -26,8 +26,21 @@ MOBILITYDB_DUCKDB_BRIDGE    ?= /tmp/mobilitydb_duckdb_bridge.duckdb_extension
 # and ducklink targets.
 MOBILITYDB_SQLITE_BRIDGE    ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm:$(HOME)/git/mobilitydb-sqlink-bridge/mobilitydb-sqlink-loadable.wasm
 MOBILITYDB_DUCKLINK_BRIDGE  ?= $(HOME)/git/postgis-ducklink-bridge/postgis-ducklink-loadable.wasm:$(HOME)/git/mobilitydb-ducklink-bridge/mobilitydb-ducklink-loadable.wasm
-POSTGIS_SHIM                ?= /tmp/postgis-shim-composed.wasm
-MOBILITYDB_SHIM             ?= /tmp/mobilitydb-composed.wasm
+# Composed shim wasm — the datafission-vendored copies are the
+# canonical ones (post-kebab-fix at the wasm extern-name level,
+# matching the codegen's `kebab_fix_wit` rewrite of the bridge
+# WIT). See SHIM-BRIDGES.md's "Why the datafission-vendored shim"
+# section. The raw `~/git/postgis-wasm/postgis-composed.wasm`
+# and `~/git/mobilitydb-wasm/mobilitydb-composed.wasm` will fail
+# `wac plug` with a resource-identity mismatch.
+#
+# Only actively used by the sqlite (sqlink) and legacy duckdb
+# targets (via `<EXT>_SHIM_WASM` env var). The ducklink target
+# doesn't need the shim at runtime — it's already `wac plug`'d
+# into the composed loadable — but the vars are set to canonical
+# paths for consistency.
+POSTGIS_SHIM                ?= $(HOME)/git/datafission/extensions/postgis/deps/postgis-composed.wasm
+MOBILITYDB_SHIM             ?= $(HOME)/git/mobilitydb-wasm/mobilitydb-composed.wasm
 
 # Optional preprocessor wiring. When SHIM_SQL_PREPROCESS is set,
 # scripts/run.sh pipes each case file through it (with the
