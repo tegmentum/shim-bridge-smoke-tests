@@ -41,8 +41,13 @@ struct Cli {
 enum Cmd {
     /// Seed `test_cases` from a TOML fixture file.
     Seed {
-        /// Interface DB path.
-        #[arg(long, default_value = "/tmp/postgis-interface.sqlite")]
+        /// Interface DB path. REQUIRED — there is no safe
+        /// default because each shim owns its own canonical DB
+        /// (postgis-shim-interface, mobilitydb-shim-interface,
+        /// timescaledb-shim-interface). Pointing at a shared
+        /// `/tmp` path silently drifted between callers, so the
+        /// flag is now mandatory and validated below.
+        #[arg(long)]
         interface: PathBuf,
         /// Extension name (e.g. `postgis`).
         #[arg(long)]
@@ -58,8 +63,8 @@ enum Cmd {
 
     /// Run cases for a single function.
     Run {
-        /// Interface DB path.
-        #[arg(long, default_value = "/tmp/postgis-interface.sqlite")]
+        /// Interface DB path. REQUIRED — see `seed` for why.
+        #[arg(long)]
         interface: PathBuf,
         /// Extension name (e.g. `postgis`).
         #[arg(long)]
@@ -94,8 +99,8 @@ enum Cmd {
 
     /// Coverage roll-up over the interface DB. No test execution.
     Coverage {
-        /// Interface DB path.
-        #[arg(long, default_value = "/tmp/postgis-interface.sqlite")]
+        /// Interface DB path. REQUIRED — see `seed` for why.
+        #[arg(long)]
         interface: PathBuf,
         /// Extension name (e.g. `postgis`).
         #[arg(long)]
@@ -106,6 +111,24 @@ enum Cmd {
     },
 }
 
+/// Guard against pointing at a not-yet-created interface DB. The
+/// three canonical repos own their own copies; refuse to run
+/// blind and drop a hint at the ones the operator likely meant.
+fn require_interface(path: &std::path::Path) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!(
+            "interface DB {} does not exist.\n\
+             Point --interface at one of the canonical shim-interface \
+             databases:\n  \
+             ~/git/postgis-shim-interface/postgis-interface.sqlite\n  \
+             ~/git/mobilitydb-shim-interface/mobilitydb-interface.sqlite\n  \
+             ~/git/timescaledb-shim-interface/timescaledb-interface.sqlite",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -114,8 +137,10 @@ fn main() -> Result<()> {
             extension,
             from,
             replace,
-        } => seed::run(&interface, &extension, &from, replace)
-            .context("seed"),
+        } => {
+            require_interface(&interface)?;
+            seed::run(&interface, &extension, &from, replace).context("seed")
+        }
         Cmd::Run {
             interface,
             extension,
@@ -126,22 +151,28 @@ fn main() -> Result<()> {
             ducklink,
             force,
             json,
-        } => runner::run(runner::Args {
-            interface,
-            extension,
-            function,
-            case,
-            bridge,
-            provider,
-            ducklink,
-            force,
-            json,
-        })
-        .context("run"),
+        } => {
+            require_interface(&interface)?;
+            runner::run(runner::Args {
+                interface,
+                extension,
+                function,
+                case,
+                bridge,
+                provider,
+                ducklink,
+                force,
+                json,
+            })
+            .context("run")
+        }
         Cmd::Coverage {
             interface,
             extension,
             json,
-        } => db::coverage(&interface, &extension, json).context("coverage"),
+        } => {
+            require_interface(&interface)?;
+            db::coverage(&interface, &extension, json).context("coverage")
+        }
     }
 }

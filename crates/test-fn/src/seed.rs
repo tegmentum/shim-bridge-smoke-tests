@@ -58,15 +58,44 @@ pub fn run(
                 buf
             };
             let src = c.source.as_deref().unwrap_or("handrolled");
-            let mode = if replace { "REPLACE" } else { "IGNORE" };
-            let n = conn.execute(
-                &format!(
-                    "INSERT OR {mode} INTO test_cases
-                        (extension, function_name, case_name,
-                         source, source_path, sql_inline, expected,
-                         tags_json)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,'[]')"
-                ),
+            // Two-step upsert. The naive `INSERT OR REPLACE` path
+            // deletes the existing test_cases row before inserting
+            // the new one, which trips the FK on `test_runs` (there
+            // is no ON DELETE CASCADE on that constraint — see
+            // shim-interface-core/src/schema.sql §test_runs). The
+            // UPDATE-first flow preserves the PK row so historical
+            // `test_runs` stay valid, and the follow-up
+            // `INSERT OR IGNORE` picks up brand-new cases.
+            let updated_now = if replace {
+                conn.execute(
+                    "UPDATE test_cases SET
+                        source = ?4,
+                        source_path = ?5,
+                        sql_inline = ?6,
+                        expected = ?7,
+                        tags_json = '[]'
+                     WHERE extension = ?1
+                       AND function_name = ?2
+                       AND case_name = ?3",
+                    params![
+                        extension,
+                        fn_name,
+                        c.name,
+                        src,
+                        source_path,
+                        sql,
+                        c.expects,
+                    ],
+                )?
+            } else {
+                0
+            };
+            let inserted_now = conn.execute(
+                "INSERT OR IGNORE INTO test_cases
+                    (extension, function_name, case_name,
+                     source, source_path, sql_inline, expected,
+                     tags_json)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,'[]')",
                 params![
                     extension,
                     fn_name,
@@ -77,9 +106,9 @@ pub fn run(
                     c.expects,
                 ],
             )?;
-            if n == 1 {
+            if inserted_now == 1 {
                 inserted += 1;
-            } else if replace {
+            } else if updated_now == 1 {
                 updated += 1;
             }
         }

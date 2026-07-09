@@ -128,6 +128,7 @@ pub fn run(args: Args) -> Result<()> {
             scratch.path(),
             &ext_name,
             &case.sql_inline,
+            args.json,
         )?;
         let duration_ms = started.elapsed().as_millis() as i64;
         let expected = case.expected.trim().to_string();
@@ -212,6 +213,12 @@ pub fn run(args: Args) -> Result<()> {
                 &format!("case={first_fail}"),
                 &ran_at,
             )?;
+            // MVP: mark_failed reuses `implemented_unverified` (the
+            // schema's status enum doesn't include `broken` yet).
+            // The next run without --force will re-execute because
+            // the verified-hash columns are now NULL, so
+            // `status::is_cache_hit` returns false.
+            new_status = "implemented_unverified".to_string();
         }
     }
 
@@ -242,6 +249,7 @@ fn execute_probe(
     ext_dir: &std::path::Path,
     ext_name: &str,
     probe_sql: &str,
+    json: bool,
 ) -> Result<String> {
     let mut script = String::new();
     script.push_str(&format!("LOAD {};\n", ext_name));
@@ -277,6 +285,35 @@ fn execute_probe(
     // then extract the last CSV result row before any errors.
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    // If the child bailed out — nonexistent bridge path, dylib
+    // load failure, panic, missing ducklink components — the
+    // exit status is our only reliable signal. Fold it into
+    // `actual` as an ERROR string so the test_runs row carries
+    // a diagnostic instead of empty output.
+    if !out.status.success() {
+        if !json {
+            eprintln!(
+                "child exited non-zero ({:?}); full stderr:\n{}",
+                out.status.code(),
+                stderr
+            );
+        }
+        let tail = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Ok(format!(
+            "ERROR: exit={:?} stderr={}",
+            out.status.code(),
+            tail
+        ));
+    }
     // For an internal binder error we want to surface it — the
     // string carries the diagnostic. Prefer stderr first.
     if stderr.contains("internal error") || stdout.contains("internal error") {

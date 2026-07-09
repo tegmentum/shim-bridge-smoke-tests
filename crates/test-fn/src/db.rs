@@ -177,10 +177,15 @@ pub fn mark_verified(
     Ok(())
 }
 
-/// The schema's status enum doesn't include `broken`; the design
-/// spec's downgrade wording is aspirational. We record failures
-/// via `notes` and leave `status` where it is, so future schema
-/// widening can retro-populate without data loss.
+/// Demote a scalar row on failure. MVP: we reuse
+/// `implemented_unverified` because the schema's status enum
+/// doesn't yet include a distinct `broken` value (future
+/// enhancement — see docs/DISCOVERY-UX §7). Alongside the status
+/// flip we NULL out `last_verified_signature_hash` and
+/// `last_verified_implementation_hash` so `status::is_cache_hit`
+/// returns false on the next invocation and the harness re-runs
+/// without needing `--force`. The failure reason lands in
+/// `notes` for post-mortem.
 pub fn mark_failed(
     conn: &Connection,
     extension: &str,
@@ -190,7 +195,12 @@ pub fn mark_failed(
 ) -> Result<()> {
     let note = format!("test-fn FAIL @ {}: {}", ran_at, reason);
     conn.execute(
-        "UPDATE scalars SET notes = ?3 WHERE extension = ?1 AND name = ?2",
+        "UPDATE scalars SET
+            status = 'implemented_unverified',
+            last_verified_signature_hash = NULL,
+            last_verified_implementation_hash = NULL,
+            notes = ?3
+         WHERE extension = ?1 AND name = ?2",
         params![extension, function, note],
     )?;
     Ok(())
