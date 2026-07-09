@@ -206,7 +206,7 @@ fn main() -> Result<()> {
     let mut skipped_no_expected = 0usize;
     let mut skipped_binary = 0usize;
     let mut files_no_expected = 0usize;
-    let mut flagged_fixture_bad = 0usize;
+    let mut flagged_fixture_bad_cases = 0usize;
 
     for sql_path in &sql_files {
         let raw = match std::fs::read_to_string(sql_path) {
@@ -360,7 +360,7 @@ fn main() -> Result<()> {
                     if let Some(pat) = fixture_bad_pattern {
                         tags.push(format!("fixture_bad_pattern:{}", pat));
                     }
-                    flagged_fixture_bad += 1;
+                    flagged_fixture_bad_cases += 1;
                 }
                 for other in &top_calls {
                     if other.function != tc.function {
@@ -400,7 +400,7 @@ fn main() -> Result<()> {
     println!("  skipped (no label):           {}", skipped_no_label);
     println!("  skipped (no expected row):    {}", skipped_no_expected);
     println!("  skipped (binary):             {}", skipped_binary);
-    println!("  flagged (fixture_bad):        {}", flagged_fixture_bad);
+    println!("  flagged fixture_bad cases:    {}", flagged_fixture_bad_cases);
 
     if cli.dry_run {
         return Ok(());
