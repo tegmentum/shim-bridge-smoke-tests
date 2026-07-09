@@ -225,7 +225,157 @@ fn main() -> Result<()> {
         writeln!(out)?;
     }
 
+    // B4 (2026-07-09): Types / Operators / Casts / Spatial Indexes /
+    // Preprocessor Patterns sections. Each renders every row from the
+    // matching catalog table with its lineage-tracked status glyph.
+    // The catalog table names include lineage columns as of v4; older
+    // v3 DBs would 404 on the SELECT — we gate each section on the
+    // signature_hash column existing so this binary still runs against
+    // a legacy DB (it just skips the new sections then).
+    emit_entity_kind_section(
+        &mut out,
+        &conn,
+        extension,
+        "Types",
+        "column_types",
+        "type_name",
+        &["type_name", "storage_size"],
+    )?;
+    emit_entity_kind_section(
+        &mut out,
+        &conn,
+        extension,
+        "Operators",
+        "operators",
+        "symbol",
+        &["symbol", "function_name"],
+    )?;
+    emit_entity_kind_section(
+        &mut out,
+        &conn,
+        extension,
+        "Casts",
+        "cast_rewrites",
+        "target_type",
+        &["source_kind", "target_type", "function_name"],
+    )?;
+    emit_entity_kind_section(
+        &mut out,
+        &conn,
+        extension,
+        "Spatial Indexes",
+        "spatial_indexes",
+        "name",
+        &["name"],
+    )?;
+    emit_entity_kind_section(
+        &mut out,
+        &conn,
+        extension,
+        "Preprocessor Patterns",
+        "preprocessor_patterns",
+        "op_token",
+        &["op_token", "function_name"],
+    )?;
+
     Ok(())
+}
+
+/// B4: render a section for one of the five non-function catalog
+/// tables. Each row shows its identifying columns + status glyph.
+/// Rows are ordered by the first identity column so diffs stay
+/// stable.
+///
+/// `title` — h2 heading (e.g. `"Types"`).
+/// `table` — SQLite table name (e.g. `"column_types"`).
+/// `order_col` — column to `ORDER BY` for stable output.
+/// `display_cols` — columns to render in the table's leftmost
+/// value cell, joined with `\` (backslash for markdown escaping).
+///
+/// The section is silently skipped if the table lacks the
+/// `signature_hash` column (i.e. we're pointed at a legacy v3
+/// DB that predates B4).
+fn emit_entity_kind_section(
+    out: &mut fs::File,
+    conn: &Connection,
+    extension: &str,
+    title: &str,
+    table: &str,
+    order_col: &str,
+    display_cols: &[&str],
+) -> Result<()> {
+    if !table_has_column(conn, table, "signature_hash")? {
+        return Ok(());
+    }
+    // Count first, so the heading can render "## Types (29)".
+    let count_sql = format!("SELECT COUNT(*) FROM {table} WHERE extension = ?1");
+    let n: i64 = conn.query_row(&count_sql, params![extension], |r| r.get(0))?;
+    if n == 0 {
+        // No rows to show — omit the section entirely rather than
+        // stamping an empty "## Types (0)" header.
+        return Ok(());
+    }
+    writeln!(out, "## {title} ({n})")?;
+    writeln!(out)?;
+    writeln!(out, "| {} | Status | Last verified |", display_cols.join(" | "))?;
+    let mut sep = String::from("|");
+    for _ in display_cols {
+        sep.push_str("---|");
+    }
+    sep.push_str("--------|---------------|");
+    writeln!(out, "{sep}")?;
+
+    let sel = format!(
+        "SELECT {sel_cols}, status, last_verified_at FROM {table} \
+         WHERE extension = ?1 ORDER BY {order_col}",
+        sel_cols = display_cols.join(", "),
+        table = table,
+        order_col = order_col,
+    );
+    let mut stmt = conn.prepare(&sel)?;
+    let n_disp = display_cols.len();
+    let rows_iter = stmt.query_map(params![extension], |r| {
+        let mut vals: Vec<String> = Vec::with_capacity(n_disp);
+        for i in 0..n_disp {
+            let v: Option<rusqlite::types::Value> = r.get(i)?;
+            vals.push(match v {
+                Some(rusqlite::types::Value::Text(s)) => s,
+                Some(rusqlite::types::Value::Integer(n)) => n.to_string(),
+                Some(rusqlite::types::Value::Real(f)) => f.to_string(),
+                Some(rusqlite::types::Value::Blob(b)) => format!("<blob:{}>", b.len()),
+                _ => "—".to_string(),
+            });
+        }
+        let status: String = r.get(n_disp)?;
+        let last_verified: Option<String> = r.get(n_disp + 1)?;
+        Ok((vals, status, last_verified))
+    })?;
+    for row in rows_iter {
+        let (vals, status, last_verified) = row?;
+        writeln!(
+            out,
+            "| {} | {} | {} |",
+            vals.join(" | "),
+            status_glyph(&status),
+            last_verified.as_deref().unwrap_or("—"),
+        )?;
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+/// Return true if `table` has a column named `col`. Uses
+/// `PRAGMA table_info` so we don't have to hard-code the column
+/// list per SQLite version.
+fn table_has_column(conn: &Connection, table: &str, col: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let iter = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for row in iter {
+        if row? == col {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn extension_title(ext: &str) -> String {
