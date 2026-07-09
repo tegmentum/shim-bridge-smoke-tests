@@ -50,6 +50,44 @@ const FIXTURE_BAD_PATTERNS: &[&str] = &[
     // or a `::geometry`-cast literal immediately followed by one of
     // the operator glyphs and another geometry-shaped expression.
     r"st_[a-z_]+\s*\([^)]*\)\s*(=|<>|&&|<->|<#>|<<\||\|>>|&<\||\|&>|~=|&&&)\s*st_[a-z_]+\s*\(",
+    // TimescaleDB hypertable-scoped fixtures. The shim can't
+    // provision hypertables, chunks, continuous aggregates, or any
+    // catalog table under `_timescaledb_catalog.*` /
+    // `_timescaledb_functions.*`, so any SELECT whose top call
+    // wraps a hypertable-management/introspection function or
+    // touches an internal catalog is by definition not testable
+    // against the DuckDB-backed shim. We still emit the row
+    // (bookkeeping) but stamp it fixture_bad.
+    r"\b_timescaledb_(catalog|functions|internal|config)\b",
+    r"\bcreate_hypertable\s*\(",
+    r"\badd_dimension\s*\(",
+    r"\badd_continuous_aggregate_policy\s*\(",
+    r"\badd_(compression|retention|reorder|columnstore|compaction)_policy\s*\(",
+    r"\bremove_(compression|retention|reorder|columnstore|compaction|continuous_aggregate)_policy\s*\(",
+    r"\brefresh_continuous_aggregate\s*\(",
+    r"\bcompress_chunk\s*\(",
+    r"\bdecompress_chunk\s*\(",
+    r"\brecompress_chunk\s*\(",
+    r"\bdrop_chunks\s*\(",
+    r"\bshow_chunks\s*\(",
+    r"\bhypertable_(size|detailed_size|approximate_size|approximate_detailed_size|index_size|columnstore_stats|compression_stats)\s*\(",
+    r"\bchunks?_(detailed_size|columnstore_stats|compression_stats)\s*\(",
+    r"\bapproximate_row_count\s*\(",
+    r"\bset_(chunk_time_interval|integer_now_func|number_partitions|partitioning_interval)\s*\(",
+    r"\battach_(chunk|tablespace)\s*\(",
+    r"\bdetach_(chunk|tablespace|tablespaces)\s*\(",
+    r"\bmove_chunk\s*\(",
+    r"\bsplit_chunk\s*\(",
+    r"\bmerge_chunks\s*\(",
+    r"\breorder_chunk\s*\(",
+    r"\benable_chunk_skipping\s*\(",
+    r"\bdisable_chunk_skipping\s*\(",
+    r"\brun_job\s*\(",
+    r"\bdelete_job\s*\(",
+    r"\balter_job\s*\(",
+    r"\bshow_(policies|tablespaces)\s*\(",
+    r"\brestart_background_workers\s*\(",
+    r"\b(start|stop)_background_workers\s*\(",
 ];
 
 const PG_ONLY_PATTERNS: &[&str] = &[

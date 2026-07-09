@@ -104,6 +104,7 @@ struct Cli {
 enum Extension {
     Postgis,
     Mobilitydb,
+    Timescaledb,
 }
 
 impl Extension {
@@ -111,7 +112,15 @@ impl Extension {
         match self {
             Extension::Postgis => "postgis",
             Extension::Mobilitydb => "mobilitydb",
+            Extension::Timescaledb => "timescaledb",
         }
+    }
+
+    /// True when expected `.out` files are aligned psql (echoed
+    /// SELECT + column header + data + `(N rows)` marker), rather
+    /// than the label-first `psql -tA` shape PostGIS uses.
+    fn uses_echo_alignment(self) -> bool {
+        matches!(self, Extension::Mobilitydb | Extension::Timescaledb)
     }
 }
 
@@ -239,11 +248,12 @@ fn main() -> Result<()> {
         let stripped = parse::strip_comments(&raw);
         let stmts = parse::split_statements(&stripped);
 
-        // MobilityDB has no per-SELECT labels; instead the aligned
-        // .out file echoes each SELECT verbatim followed by its
-        // data row(s). Build a `stmt_text -> data_row` index that
-        // captures the row after each echoed `SELECT ...;` line.
-        let expected_by_echo: HashMap<String, String> = if matches!(cli.extension, Extension::Mobilitydb) {
+        // MobilityDB / TimescaleDB have no per-SELECT labels;
+        // instead the aligned .out file echoes each SELECT verbatim
+        // followed by its data row(s). Build a `stmt_text -> data_row`
+        // index that captures the row after each echoed `SELECT ...;`
+        // line.
+        let expected_by_echo: HashMap<String, String> = if cli.extension.uses_echo_alignment() {
             build_echo_index(&expected_raw)
         } else {
             HashMap::new()
@@ -295,7 +305,7 @@ fn main() -> Result<()> {
                     };
                     row.as_str()
                 }
-                Extension::Mobilitydb => {
+                Extension::Mobilitydb | Extension::Timescaledb => {
                     // Normalize whitespace and lookup.
                     let key = normalise_echo_key(&stmt.text);
                     let Some(row) = expected_by_echo.get(&key) else {
@@ -375,7 +385,15 @@ fn main() -> Result<()> {
                 // Inject `::GEOMETRY` casts on WKT string literals
                 // so the DuckDB binder matches the shim's
                 // `(postgis.geometry, ...)` signatures (Fix 1).
-                let probe_sql = preprocess::inject_geometry_casts(&stripped);
+                // TimescaleDB has no geometry surface — skip the
+                // rewrite so we don't corrupt unrelated string
+                // literals that happen to start with `POINT`.
+                let probe_sql = match cli.extension {
+                    Extension::Postgis | Extension::Mobilitydb => {
+                        preprocess::inject_geometry_casts(&stripped)
+                    }
+                    Extension::Timescaledb => stripped,
+                };
                 cases.push(NormalisedCase {
                     extension: ext_name.clone(),
                     function_name: tc.function.clone(),
@@ -447,6 +465,11 @@ fn collect_sql_files(
         let is_sql = match ext {
             Extension::Postgis => name.ends_with(".sql"),
             Extension::Mobilitydb => name.ends_with(".sql") || name.ends_with(".test.sql"),
+            // TimescaleDB has `.sql` (concrete) + `.sql.in`
+            // (CMake-templated but the top-level SQL is still
+            // scrapable — templating is mostly \set/\if plumbing
+            // that the parser will skip as non-SELECT).
+            Extension::Timescaledb => name.ends_with(".sql") || name.ends_with(".sql.in"),
         };
         if !is_sql {
             continue;
@@ -501,6 +524,30 @@ fn resolve_expected(sql_path: &Path, ext: Extension) -> Option<PathBuf> {
             } else {
                 None
             }
+        }
+        Extension::Timescaledb => {
+            // Path shape: .../test/sql/<name>.sql[.in]
+            //          -> .../test/expected/<name>.out
+            // Some `.out` files are pinned per-PG-major
+            // (`<name>-17.out`, `<name>-16.out`, ...); prefer the
+            // newest major we know about.
+            let file_name = sql_path.file_name()?.to_string_lossy().to_string();
+            let stem = file_name
+                .strip_suffix(".sql.in")
+                .or_else(|| file_name.strip_suffix(".sql"))?
+                .to_string();
+            let path_str = sql_path.to_string_lossy().to_string();
+            let expected_dir_str = path_str.replace("/sql/", "/expected/");
+            let mut base = PathBuf::from(expected_dir_str);
+            // Try version-pinned first (newest majors first), then
+            // the un-suffixed shape.
+            for suffix in &["-17.out", "-16.out", "-15.out", "-14.out", ".out"] {
+                base.set_file_name(format!("{}{}", stem, suffix));
+                if base.exists() {
+                    return Some(base);
+                }
+            }
+            None
         }
     }
 }
@@ -566,6 +613,38 @@ fn bulk_tag_for(sql_path: &Path, ext: Extension) -> Option<String> {
             ];
             for (dir, tag) in dir_table {
                 if parent_name.contains(dir) {
+                    return Some(format!("leaf:{}", tag));
+                }
+            }
+            None
+        }
+        Extension::Timescaledb => {
+            // Filename-based fallback for cases whose top-level
+            // call isn't in the catalog (rare — the catalog covers
+            // all the toolkit surface). Provides a stable
+            // leaf-bucket for classic per-file suites.
+            let table: &[(&str, &str)] = &[
+                ("histogram_test.sql", "timescale_hyperfunctions"),
+                ("agg_bookends.sql", "timescale_hyperfunctions"),
+                ("agg_bookends.sql.in", "timescale_hyperfunctions"),
+                ("create_hypertable.sql", "timescale_hypertable"),
+                ("chunks.sql", "timescale_hypertable"),
+                ("chunk_utils.sql", "timescale_hypertable"),
+                ("chunk_adaptive.sql", "timescale_hypertable"),
+                ("drop_hypertable.sql", "timescale_hypertable"),
+                ("drop_rename_hypertable.sql", "timescale_hypertable"),
+                ("dimensions.sql", "timescale_hypertable"),
+                ("cagg_ddl.sql.in", "timescale_continuous_agg"),
+                ("cagg_refresh.sql", "timescale_continuous_agg"),
+                ("cagg_policy.sql", "timescale_policy"),
+                ("bgw_policy.sql", "timescale_policy"),
+                ("compress_chunk.sql", "timescale_compression"),
+                ("compression.sql.in", "timescale_compression"),
+                ("compression_ddl.sql", "timescale_compression"),
+                ("compression_conflicts.sql.in", "timescale_compression"),
+            ];
+            for (fname, tag) in table {
+                if &name == fname {
                     return Some(format!("leaf:{}", tag));
                 }
             }
@@ -650,6 +729,10 @@ fn build_label_index(expected_raw: &str, ext: Extension) -> HashMap<String, Stri
                 body_buf.push(t.to_string());
             }
         }
+        Extension::Timescaledb => {
+            // TimescaleDB alignment is echo-based (built inline via
+            // `build_echo_index` below); no label index is used.
+        }
     }
     idx
 }
@@ -709,43 +792,81 @@ fn build_echo_index(expected_raw: &str) -> HashMap<String, String> {
             let key = normalise_echo_key(&echo);
             // Advance past the echo.
             let mut k = j + 1;
-            // Skip the column-name header row (may be blank).
+            // Skip blank lines between the echo and either the
+            // column-name header row or the first psql notice/error
+            // line. If the first non-blank line is an `ERROR:` /
+            // `NOTICE:` / `WARNING:` message OR another echoed
+            // statement, the current SELECT produced no rowset --
+            // don't invent a body for it. Same for `psql:`-prefixed
+            // client errors.
             while k < lines.len() && lines[k].trim().is_empty() {
                 k += 1;
             }
-            if k < lines.len() {
-                // The header. Skip.
+            if k >= lines.len() {
+                i = j + 1;
+                continue;
+            }
+            let first_non_blank = lines[k].trim();
+            let is_diagnostic = first_non_blank.starts_with("ERROR:")
+                || first_non_blank.starts_with("NOTICE:")
+                || first_non_blank.starts_with("WARNING:")
+                || first_non_blank.starts_with("HINT:")
+                || first_non_blank.starts_with("DETAIL:")
+                || first_non_blank.starts_with("psql:");
+            let is_next_echo = first_non_blank.starts_with("SELECT ")
+                || first_non_blank.starts_with("SELECT\t")
+                || first_non_blank.starts_with('\\')
+                || first_non_blank.starts_with("--");
+            if is_diagnostic || is_next_echo {
+                // Nothing to bind; move on. Do NOT consume the next
+                // echo -- the outer loop will re-enter it below.
+                i = j + 1;
+                continue;
+            }
+            // The header. Skip.
+            k += 1;
+            // Skip the separator dashes.
+            if k < lines.len()
+                && lines[k].trim_start().chars().all(|c| c == '-' || c.is_whitespace())
+            {
                 k += 1;
-                // Skip the separator dashes.
-                if k < lines.len()
-                    && lines[k].trim_start().chars().all(|c| c == '-' || c.is_whitespace())
+            }
+            // Collect data-row lines until `(N rows)` marker.
+            let mut body: Vec<String> = Vec::new();
+            let mut aborted = false;
+            while k < lines.len() {
+                let t = lines[k].trim();
+                if t.starts_with('(') && (t.ends_with("row)") || t.ends_with("rows)")) {
+                    break;
+                }
+                if t.starts_with("ERROR:")
+                    || t.starts_with("NOTICE:")
+                    || t.starts_with("WARNING:")
                 {
-                    k += 1;
+                    aborted = true;
+                    break;
                 }
-                // Collect data-row lines until `(N rows)` marker.
-                let mut body: Vec<String> = Vec::new();
-                while k < lines.len() {
-                    let t = lines[k].trim();
-                    if t.starts_with('(') && t.ends_with("row)") {
-                        break;
-                    }
-                    if t.starts_with('(') && t.ends_with("rows)") {
-                        break;
-                    }
-                    if t.starts_with("ERROR:") {
-                        // Skip errors -- not testable.
-                        break;
-                    }
-                    if !t.is_empty() {
-                        body.push(t.to_string());
-                    }
-                    k += 1;
+                // Another echoed statement (or psql meta-command)
+                // terminates the current SELECT's body without a
+                // `(N rows)` marker. This happens when the result
+                // set is empty or when the runner didn't emit a
+                // marker (some psql modes). Bail out and don't emit
+                // a partial body -- we can't distinguish a real
+                // datum from the echo header.
+                if t.starts_with("SELECT ") || t.starts_with('\\') {
+                    aborted = true;
+                    break;
                 }
-                // Only emit single-row bodies to align with the
-                // downstream runner's last-line heuristic.
-                if body.len() == 1 {
-                    idx.entry(key).or_insert_with(|| body[0].clone());
+                if !t.is_empty() {
+                    body.push(t.to_string());
                 }
+                k += 1;
+            }
+            // Only emit single-row bodies to align with the
+            // downstream runner's last-line heuristic. Skip if we
+            // aborted mid-body due to a diagnostic.
+            if !aborted && body.len() == 1 {
+                idx.entry(key).or_insert_with(|| body[0].clone());
             }
             i = j + 1;
             continue;
