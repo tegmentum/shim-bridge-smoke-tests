@@ -12,6 +12,12 @@
 //!      `implemented_unverified` (mark_failed) even when the
 //!      failing case count is < planned (fixture_bad excluded from
 //!      the denominator).
+//!   5. A function mixing `pass` + `fixture_bad` + `fail` triples
+//!      demotes on the *real* failure alone — fixture_bad must not
+//!      inflate the fail count, nor mask a real pass. This locks
+//!      the invariant flagged in the #72 fanout review: the
+//!      status-promotion decision reads from the runnable subset
+//!      only (`s.pass`, `s.fail`), never the raw case count.
 //!
 //! The test drives the real `test-fn` binary via a scratch sqlite
 //! DB and a shell-script "ducklink" whose exit code / stdout are
@@ -325,6 +331,45 @@ fn batch_fixture_bad_skip_matrix() {
             "date",
             "[\"leaf:test\"]",
         );
+
+        // fn_pass_bad_fail — three cases: one pass, one
+        // fixture_bad, one fail. The runnable subset is (pass, fail)
+        // so mark_failed must fire on the real failure alone —
+        // fixture_bad neither inflates the fail count nor blocks
+        // the promotion path from seeing the real pass. Locks the
+        // #72-review invariant that fixture_bad is invisible to
+        // `s.pass` / `s.fail`.
+        insert_scalar(
+            &conn,
+            "fn_pass_bad_fail",
+            "implemented_verified",
+            "sig-e",
+            "im-e",
+        );
+        insert_case(
+            &conn,
+            "fn_pass_bad_fail",
+            "c1",
+            "-- SQL: OK:elderberry\nSELECT 'elderberry';",
+            "elderberry",
+            "[\"leaf:test\"]",
+        );
+        insert_case(
+            &conn,
+            "fn_pass_bad_fail",
+            "c2",
+            "-- SQL: BAD:elderberry\nSELECT 'elderberry';",
+            "elderberry",
+            "[\"leaf:test\",\"fixture_bad\"]",
+        );
+        insert_case(
+            &conn,
+            "fn_pass_bad_fail",
+            "c3",
+            "-- SQL: BAD:elderberry\nSELECT 'elderberry';",
+            "elderberry",
+            "[\"leaf:test\"]",
+        );
     }
 
     // Fake ducklink shell script.
@@ -408,5 +453,24 @@ fn batch_fixture_bad_skip_matrix() {
         status_of(&conn, "fn_all_pass"),
         "implemented_verified",
         "all pass -> promote"
+    );
+
+    // 5. pass + fixture_bad + fail: exactly 2 runs (the fixture_bad
+    //    case must be skipped), and the real failure alone drives
+    //    the demotion to `implemented_unverified`. Guarantees that
+    //    the runner's status-promotion arithmetic reads `s.pass` /
+    //    `s.fail` from the runnable subset only. Regression guard
+    //    for #72: if fixture_bad ever folded back into `s.fail`,
+    //    the status would still be _unverified here (masking the
+    //    bug), but `test_run_count` would jump to 3.
+    assert_eq!(
+        test_run_count(&conn, "fn_pass_bad_fail"),
+        2,
+        "fixture_bad case must be skipped even with a real pass + real fail sibling"
+    );
+    assert_eq!(
+        status_of(&conn, "fn_pass_bad_fail"),
+        "implemented_unverified",
+        "one real fail among runnable cases -> demote (independent of fixture_bad)"
     );
 }

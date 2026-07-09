@@ -569,6 +569,23 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
     // suite is entirely `fixture_bad` is never demoted just because
     // upstream shipped broken fixtures — its prior verified/hash
     // state is preserved intact.
+    //
+    // Invariant, restated for #72 review closure: `s.pass` and
+    // `s.fail` are only ever incremented in the case-execution
+    // branch below the `is_fixture_bad()` skip at ~L467. A
+    // fixture_bad row cannot reach that branch, so it is
+    // structurally impossible for `s.fail` to include a
+    // fixture_bad-tagged case. `mark_verified` therefore fires
+    // when every runnable (non-skipped) case passed, and
+    // `mark_failed` fires when at least one runnable case failed —
+    // pg_only rows are already filtered at load time in
+    // `load_cases_by_leaf` / `load_cases_for_functions`, so both
+    // skip buckets (`pg_only` + `fixture_bad`) are absent from
+    // pass/fail arithmetic by different mechanisms but with the
+    // same effect. Regression coverage:
+    // `crates/test-fn/tests/batch_fixture_bad.rs` exercises the
+    // (all-bad, mixed-pass, mixed-fail, all-pass, pass+bad+fail)
+    // matrix end-to-end.
     let mut promoted_verified = 0usize;
     let mut promoted_failed = 0usize;
     for (fname, s) in &fn_stats {
