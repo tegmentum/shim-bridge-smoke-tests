@@ -76,11 +76,18 @@ enum Cmd {
         /// case runs and the status-promotion rule applies.
         #[arg(long)]
         case: Option<String>,
-        /// Bridge wasm (composed ducklink loadable).
+        /// Bridge wasm. In dynlink mode this is the per-sub-ext
+        /// `*_bridge_dynlink.wasm` component; ducklink registers
+        /// it under `DUCKLINK_SUB_EXT_BRIDGES=<ext>=<bridge>`.
         #[arg(long)]
         bridge: PathBuf,
-        /// Provider wasm. Defaults to the bridge path itself for
-        /// the MVP monolith mode.
+        /// Provider wasm. In dynlink mode this is the composed
+        /// monolith registered under
+        /// `DUCKLINK_SUB_EXT_PREBUILT=<ext>=<provider>`. Defaults
+        /// to the bridge path itself for the historical MVP
+        /// monolith mode where bridge==provider — retained for
+        /// pure-monolith fallback but no longer the recommended
+        /// setup now that Phase A ships dynlink bridges.
         #[arg(long)]
         provider: Option<PathBuf>,
         /// Ducklink binary.

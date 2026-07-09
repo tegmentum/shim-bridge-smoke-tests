@@ -184,6 +184,8 @@ pub fn run(args: Args) -> Result<()> {
             &args.ducklink,
             scratch.path(),
             &ext_name,
+            &resolved.bridge_path,
+            &resolved.provider_path,
             &rewritten,
             args.json,
         )?;
@@ -478,6 +480,8 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
                 &args.ducklink,
                 scratch.path(),
                 &ext_name,
+                &args.bridge,
+                &provider,
                 &rewritten,
                 args.json,
             )
@@ -674,6 +678,8 @@ fn execute_probe(
     ducklink: &std::path::Path,
     ext_dir: &std::path::Path,
     ext_name: &str,
+    bridge_path: &std::path::Path,
+    provider_path: &std::path::Path,
     probe_sql: &str,
     json: bool,
 ) -> Result<String> {
@@ -688,8 +694,36 @@ fn execute_probe(
         script.push('\n');
     }
 
+    // Phase A dynlink wiring. `ducklink-host`'s `SubExtLoader`
+    // routes a `LOAD <ext>` through the sub-ext machinery when the
+    // extension has an entry in `DUCKLINK_SUB_EXT_BRIDGES` — the
+    // bridge component is instantiated with its
+    // `compose:dynlink/linker` import wired to the composed
+    // provider registered under `<ext>-composed`. The provider
+    // comes from `DUCKLINK_SUB_EXT_PREBUILT` (the short-circuit
+    // path — a self-contained monolith wasm skips the plan-driven
+    // compose entirely). This mirrors the working sanity-smoke
+    // invocation
+    //
+    //   DUCKLINK_SUB_EXT_BRIDGES=<ext>=<bridge> \
+    //   DUCKLINK_SUB_EXT_PREBUILT=<ext>=<provider> \
+    //   ducklink -- duckdb-cli ...
+    //
+    // and replaces the earlier MVP monolith flow, which copied the
+    // bridge into `<ext_dir>/<ext>.wasm` and let ducklink resolve
+    // it flat via `--extensions-dir`. That flat path silently
+    // failed on a dynlink bridge (no provider wiring available) —
+    // #76 root cause. The scratch `<ext_dir>/<ext>.wasm` copy is
+    // kept as a belt-and-braces fallback for pure-monolith modes
+    // that don't set the sub-ext env vars, but the sub-ext branch
+    // takes precedence inside `ducklink-host::ExtensionManager`.
+    let sub_ext_bridges = format!("{}={}", ext_name, bridge_path.display());
+    let sub_ext_prebuilt = format!("{}={}", ext_name, provider_path.display());
+
     let mut cmd = Command::new(ducklink);
     cmd.env("DUCKLINK_AUTOLOAD", "")
+        .env("DUCKLINK_SUB_EXT_BRIDGES", &sub_ext_bridges)
+        .env("DUCKLINK_SUB_EXT_PREBUILT", &sub_ext_prebuilt)
         .arg("--extensions-dir")
         .arg(ext_dir)
         .arg("--")
