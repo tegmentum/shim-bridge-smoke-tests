@@ -340,16 +340,23 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
     let mut total_ran = 0usize;
     let mut total_pass = 0i64;
     let mut total_fail = 0i64;
+    let mut total_skipped_fixture_bad = 0usize;
     let mut error_patterns: std::collections::HashMap<String, i64> = Default::default();
     // Per-function running tallies + a flag tracking whether we ran
     // *every* selected case for the function (a partial run gated
     // by `--limit` or `!keep_going` must NOT promote the status).
+    //
+    // `skipped` counts cases we walked past because their `tags_json`
+    // carries `fixture_bad` — known-broken upstream fixtures that
+    // must NOT count toward pass/fail totals nor factor into the
+    // status-promotion "did we run every planned case" check.
     #[derive(Default)]
     struct FnStats {
         pass: i64,
         fail: i64,
         planned: usize,
         ran: usize,
+        skipped: usize,
     }
     let mut fn_stats: std::collections::BTreeMap<String, FnStats> =
         std::collections::BTreeMap::new();
@@ -381,6 +388,20 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
         let empty: Vec<db::TestCase> = Vec::new();
         let cases: &Vec<db::TestCase> = cases_by_fn.get(fn_name).unwrap_or(&empty);
         for case in cases {
+            // Case-level skip for known-broken upstream fixtures.
+            // We never launch the subprocess for these and never
+            // write to `test_runs`; the scraper preserves the row
+            // in `test_cases` for coverage bookkeeping only.
+            // Skipping here means the function's status-promotion
+            // denominator excludes these rows — a function whose
+            // only cases are `fixture_bad` gets left at its prior
+            // status, never demoted to `implemented_unverified`
+            // just because upstream shipped a broken fixture.
+            if case.is_fixture_bad() {
+                fn_stats.entry(fn_name.clone()).or_default().skipped += 1;
+                total_skipped_fixture_bad += 1;
+                continue;
+            }
             if total_ran >= cap {
                 break 'outer;
             }
@@ -460,20 +481,31 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
     // function's suite finishes; batch mode used to skip the
     // promotion entirely, leaving `scalars.status` stuck at
     // `implemented_unverified` even after all-pass and breaking the
-    // hash-scoped cache guarantees. We now apply the same rule:
+    // hash-scoped cache guarantees. We apply the same rule per fn,
+    // treating `fixture_bad`-tagged cases as invisible to the
+    // pass/fail tally: they neither count toward the denominator
+    // nor block promotion. Let `runnable = planned - skipped`:
     //
-    //   ran == planned && fail == 0 && pass > 0  -> mark_verified
-    //   ran == planned && fail > 0               -> mark_failed
-    //   ran < planned                            -> no-op (partial)
-    //   ran == 0                                 -> no-op
+    //   ran == runnable && runnable > 0 && fail == 0 && pass > 0
+    //                                            -> mark_verified
+    //   ran == runnable && fail > 0              -> mark_failed
+    //   ran <  runnable                          -> no-op (partial)
+    //   runnable == 0                            -> no-op (nothing
+    //                                               to promote; the
+    //                                               fn's cases are
+    //                                               all fixture_bad)
     //
     // A partial run (cap hit, --keep-going off after a fail, or
     // batch broke out early) leaves status untouched so the next
-    // full run has a chance to promote.
+    // full run has a chance to promote. And a function whose test
+    // suite is entirely `fixture_bad` is never demoted just because
+    // upstream shipped broken fixtures — its prior verified/hash
+    // state is preserved intact.
     let mut promoted_verified = 0usize;
     let mut promoted_failed = 0usize;
     for (fname, s) in &fn_stats {
-        if s.ran == 0 || s.ran < s.planned {
+        let runnable = s.planned.saturating_sub(s.skipped);
+        if runnable == 0 || s.ran < runnable {
             continue;
         }
         let row = match scalar_rows.get(fname) {
@@ -513,6 +545,12 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
         total_pass,
         total_fail
     );
+    if total_skipped_fixture_bad > 0 {
+        println!(
+            "  skipped {} case(s) tagged fixture_bad (known-broken upstream fixtures)",
+            total_skipped_fixture_bad
+        );
+    }
     println!(
         "status promotions: {} verified, {} failed (partial runs left untouched)",
         promoted_verified, promoted_failed

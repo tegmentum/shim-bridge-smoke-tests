@@ -30,6 +30,31 @@ pub struct TestCase {
     pub sql_inline: String,
     pub expected: String,
     pub source: String,
+    /// Raw `tags_json` column (JSON array of strings). Batch mode
+    /// consults this to skip `fixture_bad` cases at runtime; the
+    /// coverage roll-up parses it for `leaf:*` bucketing.
+    pub tags_json: String,
+}
+
+impl TestCase {
+    /// True if `tags_json` contains the given tag literal (exact
+    /// match, quoted). Cheap substring check — avoids a JSON parse
+    /// per row on the hot batch loop. The scraper writes tags as a
+    /// quoted-string JSON array (e.g. `["leaf:foo","fixture_bad"]`)
+    /// so a bare `"fixture_bad"` needle won't collide with the
+    /// `fixture_bad_pattern:*` companion tag.
+    pub fn has_tag(&self, tag: &str) -> bool {
+        let needle = format!("\"{}\"", tag);
+        self.tags_json.contains(&needle)
+    }
+
+    /// Convenience for the scraper's `fixture_bad` marker. Cases
+    /// carrying this tag are known-broken upstream fixtures the
+    /// shim cannot execute; batch mode skips them entirely rather
+    /// than folding them into the pass/fail totals.
+    pub fn is_fixture_bad(&self) -> bool {
+        self.has_tag("fixture_bad")
+    }
 }
 
 pub fn open(interface_db: &Path) -> Result<Connection> {
@@ -93,7 +118,7 @@ pub fn load_cases_ex(
     let mut sql = String::from(
         "SELECT extension, function_name, case_name,
                 COALESCE(sql_inline, ''), COALESCE(expected, ''),
-                source
+                source, COALESCE(tags_json, '[]')
          FROM test_cases
          WHERE extension = ?1 AND function_name = ?2",
     );
@@ -123,6 +148,7 @@ fn row_to_case(r: &rusqlite::Row) -> rusqlite::Result<TestCase> {
         sql_inline: r.get(3)?,
         expected: r.get(4)?,
         source: r.get(5)?,
+        tags_json: r.get(6)?,
     })
 }
 
@@ -278,7 +304,7 @@ pub fn load_cases_by_leaf(
     let base = String::from(
         "SELECT extension, function_name, case_name,
                 COALESCE(sql_inline, ''), COALESCE(expected, ''),
-                source
+                source, COALESCE(tags_json, '[]')
            FROM test_cases
           WHERE extension = ?1
             AND tags_json LIKE '%' || ?2 || '%'",
@@ -306,6 +332,7 @@ pub fn coverage_by_leaf(
     extension: &str,
     json: bool,
     show_pg_only: bool,
+    show_fixture_bad: bool,
 ) -> Result<()> {
     let conn = open(interface_db)?;
     // Pull all cases with their tags.
@@ -331,6 +358,11 @@ pub fn coverage_by_leaf(
         fail: i64,
         untested: i64,
         pg_only: i64,
+        /// Count of `fixture_bad`-tagged cases in this leaf.
+        /// Tracked separately so operators can see the deferred-
+        /// work backlog on known-broken upstream fixtures without
+        /// inflating the runnable-case totals.
+        fixture_bad: i64,
     }
     let mut by_leaf: std::collections::BTreeMap<String, LeafAgg> =
         std::collections::BTreeMap::new();
@@ -348,6 +380,7 @@ pub fn coverage_by_leaf(
         let tags: Vec<String> =
             serde_json::from_str(&tags_json).unwrap_or_default();
         let is_pg_only = tags.iter().any(|t| t == "pg_only");
+        let is_fixture_bad = tags.iter().any(|t| t == "fixture_bad");
         // Skip pg_only cases from the primary leaf rollup unless
         // the operator asked for them — they inflate leaf totals
         // with rows the shim can't execute.
@@ -357,12 +390,39 @@ pub fn coverage_by_leaf(
                 if let Some(leaf) = t.strip_prefix("leaf:") {
                     let a = by_leaf.entry(leaf.to_string()).or_default();
                     a.pg_only += 1;
+                    if is_fixture_bad {
+                        a.fixture_bad += 1;
+                    }
                     charged = true;
                 }
             }
             if !charged {
                 let a = by_leaf.entry("<untagged>".to_string()).or_default();
                 a.pg_only += 1;
+                if is_fixture_bad {
+                    a.fixture_bad += 1;
+                }
+            }
+            continue;
+        }
+        // Same treatment for `fixture_bad`: batch mode skips these
+        // at runtime (see runner.rs `is_fixture_bad()`), so exclude
+        // them from the primary CASES/PASS/FAIL/UNTESTED rollup
+        // unless the operator explicitly asked to fold them in.
+        // Tracked separately in `fixture_bad` so operators can see
+        // the deferred-work backlog per leaf regardless.
+        if is_fixture_bad && !show_fixture_bad {
+            let mut charged = false;
+            for t in &tags {
+                if let Some(leaf) = t.strip_prefix("leaf:") {
+                    let a = by_leaf.entry(leaf.to_string()).or_default();
+                    a.fixture_bad += 1;
+                    charged = true;
+                }
+            }
+            if !charged {
+                let a = by_leaf.entry("<untagged>".to_string()).or_default();
+                a.fixture_bad += 1;
             }
             continue;
         }
@@ -382,6 +442,9 @@ pub fn coverage_by_leaf(
                 if is_pg_only {
                     a.pg_only += 1;
                 }
+                if is_fixture_bad {
+                    a.fixture_bad += 1;
+                }
             }
         }
         if !had_leaf {
@@ -397,12 +460,16 @@ pub fn coverage_by_leaf(
             if is_pg_only {
                 a.pg_only += 1;
             }
+            if is_fixture_bad {
+                a.fixture_bad += 1;
+            }
         }
     }
     if json {
         let obj: serde_json::Value = serde_json::json!({
             "extension": extension,
             "show_pg_only": show_pg_only,
+            "show_fixture_bad": show_fixture_bad,
             "by_leaf": by_leaf.iter().map(|(k, v)| {
                 let coverage_pct = if v.cases > 0 {
                     100.0 * (v.pass as f64) / (v.cases as f64)
@@ -414,21 +481,46 @@ pub fn coverage_by_leaf(
                     "fail": v.fail,
                     "untested": v.untested,
                     "pg_only": v.pg_only,
+                    "fixture_bad": v.fixture_bad,
                     "coverage_pct": coverage_pct,
                 })
             }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&obj)?);
-    } else {
-        println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>10}",
-            "LEAF", "CASES", "PASS", "FAIL", "UNTESTED", "PG-ONLY", "COVERAGE");
+    } else if show_fixture_bad {
+        println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>10} {:>10}",
+            "LEAF", "CASES", "PASS", "FAIL", "UNTESTED", "PG-ONLY", "FIX-BAD", "COVERAGE");
         for (leaf, a) in &by_leaf {
             let pct = if a.cases > 0 {
                 100.0 * (a.pass as f64) / (a.cases as f64)
             } else { 0.0 };
-            println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>9.1}%",
-                leaf, a.cases, a.pass, a.fail, a.untested, a.pg_only, pct);
+            println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>10} {:>9.1}%",
+                leaf, a.cases, a.pass, a.fail, a.untested, a.pg_only, a.fixture_bad, pct);
         }
+        println!();
+        println!("(FIX-BAD counts fixture_bad-tagged cases per leaf. With");
+        println!(" --show-fixture-bad they are ALSO counted in CASES/PASS/FAIL/");
+        println!(" UNTESTED; drop the flag to exclude them from the rollup.)");
+        if !show_pg_only {
+            println!();
+            println!("(pg_only rows are excluded from CASES/PASS/FAIL/UNTESTED; ");
+            println!(" re-run with --show-pg-only to include them.)");
+        }
+    } else {
+        println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>10} {:>10}",
+            "LEAF", "CASES", "PASS", "FAIL", "UNTESTED", "PG-ONLY", "FIX-BAD", "COVERAGE");
+        for (leaf, a) in &by_leaf {
+            let pct = if a.cases > 0 {
+                100.0 * (a.pass as f64) / (a.cases as f64)
+            } else { 0.0 };
+            println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>10} {:>9.1}%",
+                leaf, a.cases, a.pass, a.fail, a.untested, a.pg_only, a.fixture_bad, pct);
+        }
+        println!();
+        println!("(FIX-BAD counts fixture_bad-tagged cases per leaf. They are");
+        println!(" excluded from CASES/PASS/FAIL/UNTESTED — batch mode skips");
+        println!(" these known-broken upstream fixtures. Re-run with");
+        println!(" --show-fixture-bad to fold them into the rollup.)");
         if !show_pg_only {
             println!();
             println!("(pg_only rows are excluded from CASES/PASS/FAIL/UNTESTED; ");

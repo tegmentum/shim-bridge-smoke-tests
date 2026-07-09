@@ -155,6 +155,16 @@ enum Cmd {
         /// probes the shim cannot execute.
         #[arg(long, default_value_t = false)]
         show_pg_only: bool,
+        /// Include `fixture_bad`-tagged cases in the primary rollup
+        /// counters (CASES/PASS/FAIL/UNTESTED). Only meaningful with
+        /// `--by leaf`. Off by default because batch mode skips
+        /// these known-broken upstream fixtures at runtime, so
+        /// treating them as runnable cases would over-report the
+        /// runnable-case totals. The dedicated `FIX-BAD` column is
+        /// printed either way so operators can see how much work
+        /// is deferred behind fixture_bad per leaf.
+        #[arg(long, default_value_t = false)]
+        show_fixture_bad: bool,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -250,12 +260,19 @@ fn main() -> Result<()> {
             extension,
             by,
             show_pg_only,
+            show_fixture_bad,
             json,
         } => {
             require_interface(&interface)?;
             match by.as_str() {
-                "leaf" => db::coverage_by_leaf(&interface, &extension, json, show_pg_only)
-                    .context("coverage:leaf"),
+                "leaf" => db::coverage_by_leaf(
+                    &interface,
+                    &extension,
+                    json,
+                    show_pg_only,
+                    show_fixture_bad,
+                )
+                .context("coverage:leaf"),
                 "function" => db::coverage_by_function(&interface, &extension, json)
                     .context("coverage:function"),
                 _ => db::coverage(&interface, &extension, json).context("coverage"),
