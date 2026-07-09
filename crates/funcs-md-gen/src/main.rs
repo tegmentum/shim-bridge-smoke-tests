@@ -164,12 +164,12 @@ fn main() -> Result<()> {
     writeln!(out)?;
 
     writeln!(out, "## Legend")?;
-    writeln!(out, "- Verified (has passing test cases): `V`")?;
-    writeln!(out, "- Implemented, unverified: `U`")?;
-    writeln!(out, "- Broken (test cases failing): `B`")?;
-    writeln!(out, "- Deprecated: `D`")?;
-    writeln!(out, "- Unimplemented: `-`")?;
-    writeln!(out, "- Skip: `S`")?;
+    writeln!(out, "- Verified (has passing test cases): {}", STATUS_VERIFIED)?;
+    writeln!(out, "- Implemented, unverified: {}", STATUS_UNVERIFIED)?;
+    writeln!(out, "- Broken (test cases failing): {}", STATUS_BROKEN)?;
+    writeln!(out, "- Deprecated: {}", STATUS_DEPRECATED)?;
+    writeln!(out, "- Unimplemented: {}", STATUS_UNIMPLEMENTED)?;
+    writeln!(out, "- Skip: {}", STATUS_SKIP)?;
     writeln!(out)?;
 
     // Per-leaf tables.
@@ -237,15 +237,31 @@ fn extension_title(ext: &str) -> String {
     }
 }
 
+/// Emoji glyphs surfaced in the emitted markdown. Kept as named
+/// constants so the legend section and the per-row table stay in
+/// lock-step; edit one and both change.
+///
+/// `broken` is not yet a value in the `scalars.status` enum but we
+/// reserve a glyph so the moment the schema grows it, no map edit
+/// is needed. `unknown` renders for aggregate/window rows that
+/// don't have a corresponding scalar row.
+const STATUS_VERIFIED: &str = "\u{2705}";      // ✅
+const STATUS_UNVERIFIED: &str = "\u{1F7E1}";   // 🟡
+const STATUS_BROKEN: &str = "\u{274C}";        // ❌
+const STATUS_DEPRECATED: &str = "\u{26D4}";    // ⛔
+const STATUS_UNIMPLEMENTED: &str = "\u{26AA}"; // ⚪
+const STATUS_SKIP: &str = "\u{23ED}\u{FE0F}";  // ⏭️
+const STATUS_UNKNOWN: &str = "\u{2753}";       // ❓
+
 fn status_glyph(status: &str) -> &'static str {
     match status {
-        "implemented_verified" => "V",
-        "implemented_unverified" => "U",
-        "broken" => "B",
-        "deprecated" => "D",
-        "unimplemented" => "-",
-        "skip" => "S",
-        _ => "?",
+        "implemented_verified" => STATUS_VERIFIED,
+        "implemented_unverified" => STATUS_UNVERIFIED,
+        "broken" => STATUS_BROKEN,
+        "deprecated" => STATUS_DEPRECATED,
+        "unimplemented" => STATUS_UNIMPLEMENTED,
+        "skip" => STATUS_SKIP,
+        _ => STATUS_UNKNOWN,
     }
 }
 
