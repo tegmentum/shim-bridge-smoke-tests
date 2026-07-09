@@ -29,6 +29,66 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+/// Function names that already take a WKT/WKB text or blob argument
+/// and therefore must NOT receive a `::GEOMETRY` cast on their
+/// string-literal argument. Passing the literal as `GEOMETRY` to
+/// these parsers fails DuckDB's binder because the shim declares
+/// them with `VARCHAR`/`BLOB` argument types, not `postgis.geometry`.
+///
+/// Match is case-insensitive on the enclosing call name. Names are
+/// stored lowercase.
+const WKT_PARSER_FNS: &[&str] = &[
+    "st_geomfromtext",
+    "st_geomfromewkt",
+    "st_geomfromtwkb",
+    "st_geomfromwkb",
+    "st_geomfromewkb",
+    "st_geomfromgeohash",
+    "st_geomfromgeojson",
+    "st_geomfromgml",
+    "st_geomfromkml",
+    "st_geomfrommarc21",
+    "st_pointfromtext",
+    "st_linefromtext",
+    "st_polygonfromtext",
+    "st_mpointfromtext",
+    "st_mlinefromtext",
+    "st_mpolyfromtext",
+    "st_geomcollfromtext",
+    "st_geographyfromtext",
+    "st_geogfromtext",
+    "st_geogfromwkb",
+    "st_geog_from_text",
+    "st_geog_from_wkb",
+    // Underscore variants of the WKB parsers (some drivers spell
+    // them this way).
+    "st_geom_from_text",
+    "st_geom_from_wkb",
+    "st_geom_from_ewkt",
+    "st_geom_from_ewkb",
+    "st_geom_from_twkb",
+    "st_geom_from_geojson",
+    "st_geom_from_geohash",
+    "st_geom_from_gml",
+    "st_geom_from_kml",
+    "st_geom_from_marc21",
+    "st_point_from_text",
+    "st_line_from_text",
+    "st_polygon_from_text",
+    "st_mpoint_from_text",
+    "st_mline_from_text",
+    "st_mpoly_from_text",
+    "st_geomcoll_from_text",
+    "st_geography_from_text",
+];
+
+/// True if `name` (case-insensitive) is a WKT/WKB parser that we
+/// must not inject `::GEOMETRY` casts into.
+fn is_wkt_parser(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    WKT_PARSER_FNS.contains(&lc.as_str())
+}
+
 /// The WKT type keywords we recognise, longest first so that
 /// `MULTIPOINT` is matched before `POINT`. Case-insensitive at match
 /// time.
@@ -52,11 +112,25 @@ const WKT_KEYWORDS: &[&str] = &[
 
 /// Rewrite a SQL statement so every bare-WKT string literal is
 /// followed by `::GEOMETRY`. Preserves literals that are already
-/// cast (`'POINT(1 2)'::geometry`, `'POINT(1 2)'::geography`).
+/// cast (`'POINT(1 2)'::geometry`, `'POINT(1 2)'::geography`) and
+/// preserves literals whose immediately-enclosing call is a
+/// WKT/WKB parser function (`st_geomfromtext`, `st_geomfromewkt`,
+/// `st_pointfromtext`, …) — those parsers expect a `VARCHAR`/`BLOB`
+/// argument and reject `GEOMETRY`.
 pub fn inject_geometry_casts(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut out = String::with_capacity(bytes.len() + 32);
     let mut i = 0;
+    // Stack of currently-open function-call names (lowercased).
+    // Pushed on `(` after an identifier; empty-string is pushed
+    // when the `(` is a bare grouping paren.
+    let mut call_stack: Vec<String> = Vec::new();
+    // The most recently completed identifier — set when we see a
+    // run of `[A-Za-z0-9_]`, cleared on operators/commas/etc.
+    // Preserved across whitespace so `foo (x)` still counts `foo`
+    // as the callee.
+    let mut last_ident = String::new();
+    let mut ident_active = false;
     while i < bytes.len() {
         let b = bytes[i];
         if b == b'\'' {
@@ -82,9 +156,19 @@ pub fn inject_geometry_casts(sql: &str) -> String {
             let lit_body = &sql[start + 1..j];
             out.push_str(&sql[start..=j]);
             i = j + 1;
-            if looks_like_wkt(lit_body) && !already_cast(&sql[i..]) {
+            let inside_parser = call_stack
+                .last()
+                .map(|n| !n.is_empty() && is_wkt_parser(n))
+                .unwrap_or(false);
+            if looks_like_wkt(lit_body)
+                && !already_cast(&sql[i..])
+                && !inside_parser
+            {
                 out.push_str("::GEOMETRY");
             }
+            // A literal is not an identifier; clear pending ident.
+            last_ident.clear();
+            ident_active = false;
             continue;
         }
         // Skip line/block comments so we don't accidentally rewrite
@@ -96,6 +180,8 @@ pub fn inject_geometry_casts(sql: &str) -> String {
                 out.push(bytes[i] as char);
                 i += 1;
             }
+            last_ident.clear();
+            ident_active = false;
             continue;
         }
         if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
@@ -109,8 +195,54 @@ pub fn inject_geometry_casts(sql: &str) -> String {
                 out.push_str("*/");
                 i += 2;
             }
+            last_ident.clear();
+            ident_active = false;
             continue;
         }
+        // Identifier + call-context tracking.
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            if !ident_active {
+                last_ident.clear();
+                ident_active = true;
+            }
+            last_ident.push(b as char);
+            out.push(b as char);
+            i += 1;
+            continue;
+        }
+        if b.is_ascii_whitespace() {
+            // Whitespace pauses ident collection but keeps the
+            // name available for the next `(`.
+            ident_active = false;
+            out.push(b as char);
+            i += 1;
+            continue;
+        }
+        if b == b'(' {
+            // Push the pending identifier as the current callee
+            // (or empty for a bare grouping paren).
+            call_stack.push(last_ident.clone());
+            last_ident.clear();
+            ident_active = false;
+            out.push('(');
+            i += 1;
+            continue;
+        }
+        if b == b')' {
+            // Pop unconditionally — mismatched parens would only
+            // happen on malformed SQL, and the emitted text is
+            // unchanged either way.
+            call_stack.pop();
+            last_ident.clear();
+            ident_active = false;
+            out.push(')');
+            i += 1;
+            continue;
+        }
+        // Anything else (comma, arithmetic, `.`, `;`, quotes we
+        // already handled): clear the pending identifier.
+        last_ident.clear();
+        ident_active = false;
         out.push(b as char);
         i += 1;
     }
@@ -287,5 +419,75 @@ mod tests {
         let s = "SELECT 'it''s not wkt' AS x";
         let out = inject_geometry_casts(s);
         assert_eq!(out, s);
+    }
+
+    #[test]
+    fn skips_cast_inside_st_geomfromtext() {
+        let s = "SELECT ST_GeomFromText('POINT(1 2)')";
+        let out = inject_geometry_casts(s);
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn skips_cast_inside_st_geomfromewkt_case_insensitive() {
+        let s = "SELECT st_GeomFromEWKT('SRID=4326;POINT(1 2)')";
+        let out = inject_geometry_casts(s);
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn skips_cast_inside_st_pointfromtext() {
+        let s = "SELECT ST_PointFromText('POINT(1 2)', 4326)";
+        let out = inject_geometry_casts(s);
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn skips_cast_inside_st_geog_from_text_underscore() {
+        let s = "SELECT ST_Geog_From_Text('POINT(1 2)')";
+        let out = inject_geometry_casts(s);
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn skips_cast_with_whitespace_between_ident_and_paren() {
+        let s = "SELECT ST_GeomFromText ('POINT(1 2)')";
+        let out = inject_geometry_casts(s);
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn casts_outer_wkt_when_inner_is_parser() {
+        // Outer call is st_area, inner is st_geomfromtext; the
+        // outer WKT literal (there is none here) would be cast but
+        // the inner literal (inside the parser) must not be.
+        let s = "SELECT st_area(ST_GeomFromText('POINT(1 2)'))";
+        let out = inject_geometry_casts(s);
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn casts_when_outer_call_is_not_a_parser() {
+        // ST_Buffer takes GEOMETRY, so the bare WKT literal must
+        // be cast even though it's nested inside another call.
+        let s = "SELECT st_astext(st_buffer('POINT(1 2)', 1))";
+        let out = inject_geometry_casts(s);
+        assert_eq!(
+            out,
+            "SELECT st_astext(st_buffer('POINT(1 2)'::GEOMETRY, 1))"
+        );
+    }
+
+    #[test]
+    fn call_stack_pops_on_close_paren() {
+        // The first literal is inside st_geomfromtext (skip cast);
+        // the second sits outside any parser call (cast).
+        let s =
+            "SELECT ST_GeomFromText('POINT(1 2)'), st_area('POLYGON((0 0,1 0,1 1,0 0))')";
+        let out = inject_geometry_casts(s);
+        assert_eq!(
+            out,
+            "SELECT ST_GeomFromText('POINT(1 2)'), st_area('POLYGON((0 0,1 0,1 1,0 0))'::GEOMETRY)"
+        );
     }
 }
