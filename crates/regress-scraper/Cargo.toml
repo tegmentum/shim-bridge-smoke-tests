@@ -1,0 +1,20 @@
+[package]
+name = "regress-scraper"
+version = "0.1.0"
+edition = "2021"
+description = "Scrape upstream regress corpora (PostGIS, MobilityDB) into shim-interface test_cases rows (B2)."
+license = "Apache-2.0"
+
+[[bin]]
+name = "regress-scraper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+walkdir = "2"

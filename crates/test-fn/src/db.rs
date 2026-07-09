@@ -206,6 +206,222 @@ pub fn mark_failed(
     Ok(())
 }
 
+/// Return the list of distinct function names in `test_cases` for
+/// this extension, in stable name order.
+pub fn list_functions_with_cases(conn: &Connection, extension: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT function_name FROM test_cases
+         WHERE extension = ?1 ORDER BY function_name",
+    )?;
+    let names: Vec<String> = stmt
+        .query_map(params![extension], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(names)
+}
+
+/// Return the list of distinct function names whose `test_cases`
+/// rows carry the `leaf:<leaf>` tag. Only exact-match tags are
+/// checked (the scraper writes them as JSON array strings).
+pub fn list_functions_by_leaf(
+    conn: &Connection,
+    extension: &str,
+    leaf: &str,
+) -> Result<Vec<String>> {
+    let tag = format!("\"leaf:{}\"", leaf);
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT function_name FROM test_cases
+         WHERE extension = ?1 AND tags_json LIKE '%' || ?2 || '%'
+         ORDER BY function_name",
+    )?;
+    let names: Vec<String> = stmt
+        .query_map(params![extension, tag], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(names)
+}
+
+/// Load cases whose `tags_json` contains the given `leaf:<leaf>`
+/// tag, regardless of function. Used by batch mode when the
+/// operator asked for a `--leaf` slice and wants only the leaf's
+/// own cases (not the transitive union of every case for every
+/// function the leaf touched).
+pub fn load_cases_by_leaf(
+    conn: &Connection,
+    extension: &str,
+    leaf: &str,
+) -> Result<Vec<TestCase>> {
+    let tag = format!("\"leaf:{}\"", leaf);
+    let mut stmt = conn.prepare(
+        "SELECT extension, function_name, case_name,
+                COALESCE(sql_inline, ''), COALESCE(expected, ''),
+                source
+           FROM test_cases
+          WHERE extension = ?1
+            AND tags_json LIKE '%' || ?2 || '%'
+          ORDER BY function_name, case_name",
+    )?;
+    let cases: Vec<TestCase> = stmt
+        .query_map(params![extension, tag], row_to_case)?
+        .collect::<Result<_, _>>()?;
+    Ok(cases)
+}
+
+/// Coverage grouped by `leaf:*` tag. For each leaf we roll up:
+/// total cases, cases with at least one passing run, cases with
+/// at least one failing run (no pass yet), untested cases.
+pub fn coverage_by_leaf(interface_db: &Path, extension: &str, json: bool) -> Result<()> {
+    let conn = open(interface_db)?;
+    // Pull all cases with their tags.
+    let mut stmt = conn.prepare(
+        "SELECT tc.function_name, tc.case_name, tc.tags_json,
+                (SELECT COUNT(*) FROM test_runs tr
+                    WHERE tr.extension = tc.extension
+                      AND tr.function_name = tc.function_name
+                      AND tr.case_name = tc.case_name
+                      AND tr.status = 'pass') AS pass_runs,
+                (SELECT COUNT(*) FROM test_runs tr
+                    WHERE tr.extension = tc.extension
+                      AND tr.function_name = tc.function_name
+                      AND tr.case_name = tc.case_name
+                      AND tr.status = 'fail') AS fail_runs
+           FROM test_cases tc
+          WHERE tc.extension = ?1",
+    )?;
+    #[derive(Default, Debug)]
+    struct LeafAgg {
+        cases: i64,
+        pass: i64,
+        fail: i64,
+        untested: i64,
+    }
+    let mut by_leaf: std::collections::BTreeMap<String, LeafAgg> =
+        std::collections::BTreeMap::new();
+    let rows = stmt.query_map(params![extension], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (_fn_name, _case_name, tags_json, pass_runs, fail_runs) = row?;
+        let tags: Vec<String> =
+            serde_json::from_str(&tags_json).unwrap_or_default();
+        let mut had_leaf = false;
+        for t in &tags {
+            if let Some(leaf) = t.strip_prefix("leaf:") {
+                had_leaf = true;
+                let a = by_leaf.entry(leaf.to_string()).or_default();
+                a.cases += 1;
+                if pass_runs > 0 {
+                    a.pass += 1;
+                } else if fail_runs > 0 {
+                    a.fail += 1;
+                } else {
+                    a.untested += 1;
+                }
+            }
+        }
+        if !had_leaf {
+            let a = by_leaf.entry("<untagged>".to_string()).or_default();
+            a.cases += 1;
+            if pass_runs > 0 {
+                a.pass += 1;
+            } else if fail_runs > 0 {
+                a.fail += 1;
+            } else {
+                a.untested += 1;
+            }
+        }
+    }
+    if json {
+        let obj: serde_json::Value = serde_json::json!({
+            "extension": extension,
+            "by_leaf": by_leaf.iter().map(|(k, v)| {
+                let coverage_pct = if v.cases > 0 {
+                    100.0 * (v.pass as f64) / (v.cases as f64)
+                } else { 0.0 };
+                serde_json::json!({
+                    "leaf": k,
+                    "cases": v.cases,
+                    "pass": v.pass,
+                    "fail": v.fail,
+                    "untested": v.untested,
+                    "coverage_pct": coverage_pct,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>10}",
+            "LEAF", "CASES", "PASS", "FAIL", "UNTESTED", "COVERAGE");
+        for (leaf, a) in &by_leaf {
+            let pct = if a.cases > 0 {
+                100.0 * (a.pass as f64) / (a.cases as f64)
+            } else { 0.0 };
+            println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>9.1}%",
+                leaf, a.cases, a.pass, a.fail, a.untested, pct);
+        }
+    }
+    Ok(())
+}
+
+/// Coverage grouped by function name (top-N by case count).
+pub fn coverage_by_function(interface_db: &Path, extension: &str, json: bool) -> Result<()> {
+    let conn = open(interface_db)?;
+    let mut stmt = conn.prepare(
+        "SELECT tc.function_name,
+                COUNT(*) AS cases,
+                SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM test_runs tr
+                     WHERE tr.extension = tc.extension
+                       AND tr.function_name = tc.function_name
+                       AND tr.case_name = tc.case_name
+                       AND tr.status = 'pass') THEN 1 ELSE 0 END) AS pass_cases,
+                SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM test_runs tr
+                     WHERE tr.extension = tc.extension
+                       AND tr.function_name = tc.function_name
+                       AND tr.case_name = tc.case_name
+                       AND tr.status = 'fail') AND NOT EXISTS (
+                    SELECT 1 FROM test_runs tr
+                     WHERE tr.extension = tc.extension
+                       AND tr.function_name = tc.function_name
+                       AND tr.case_name = tc.case_name
+                       AND tr.status = 'pass') THEN 1 ELSE 0 END) AS fail_cases
+           FROM test_cases tc
+          WHERE tc.extension = ?1
+          GROUP BY tc.function_name
+          ORDER BY cases DESC",
+    )?;
+    let rows: Vec<(String, i64, i64, i64)> = stmt
+        .query_map(params![extension], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    if json {
+        let obj = serde_json::json!({
+            "extension": extension,
+            "by_function": rows.iter().map(|(name, c, p, f)| serde_json::json!({
+                "function": name,
+                "cases": c,
+                "pass": p,
+                "fail": f,
+                "coverage_pct": if *c > 0 { 100.0 * (*p as f64) / (*c as f64) } else { 0.0 },
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("{:<40} {:>7} {:>7} {:>7} {:>10}", "FUNCTION", "CASES", "PASS", "FAIL", "COVERAGE");
+        for (name, c, p, f) in &rows {
+            let pct = if *c > 0 { 100.0 * (*p as f64) / (*c as f64) } else { 0.0 };
+            println!("{:<40} {:>7} {:>7} {:>7} {:>9.1}%", name, c, p, f, pct);
+        }
+    }
+    Ok(())
+}
+
 pub fn coverage(interface_db: &Path, extension: &str, json: bool) -> Result<()> {
     let conn = open(interface_db)?;
     let mut stmt = conn.prepare(

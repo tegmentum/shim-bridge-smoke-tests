@@ -244,6 +244,213 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+pub struct BatchArgs {
+    pub interface: PathBuf,
+    pub extension: String,
+    pub all: bool,
+    pub leaf: Option<String>,
+    pub functions: Vec<String>,
+    pub limit: Option<usize>,
+    pub bridge: PathBuf,
+    pub provider: Option<PathBuf>,
+    pub ducklink: PathBuf,
+    pub keep_going: bool,
+    pub json: bool,
+}
+
+/// Batch case runner. Iterates the selected `(function, case)` set
+/// against a single composed bridge, streaming test_runs rows as
+/// it goes so a Ctrl-C mid-batch leaves partial progress visible.
+///
+/// Selection rules:
+///   `--all`             every function with cases in `test_cases`
+///   `--leaf <leaf>`     functions tagged `leaf:<leaf>`
+///   `--functions f1,f2` explicit function list
+/// `--limit N` caps the total number of cases run across all
+/// functions in this invocation, bounding runtime for workflow use.
+pub fn run_batch(args: BatchArgs) -> Result<()> {
+    let conn = db::open(&args.interface)?;
+    // Collect cases directly rather than functions -> cases per
+    // function; `--leaf` selects the *cases tagged with that leaf*
+    // (not every case for every function the leaf touches, which
+    // was too broad and blew past `--limit` on unrelated files).
+    let mut cases_by_fn: std::collections::BTreeMap<String, Vec<db::TestCase>> =
+        std::collections::BTreeMap::new();
+    if !args.functions.is_empty() {
+        for f in &args.functions {
+            let fl = f.to_lowercase();
+            let cs = db::load_cases(&conn, &args.extension, &fl, None)?;
+            if !cs.is_empty() {
+                cases_by_fn.insert(fl, cs);
+            }
+        }
+    } else if let Some(leaf) = &args.leaf {
+        let cs = db::load_cases_by_leaf(&conn, &args.extension, leaf)?;
+        for c in cs {
+            cases_by_fn
+                .entry(c.function_name.clone())
+                .or_default()
+                .push(c);
+        }
+    } else if args.all {
+        for fn_name in db::list_functions_with_cases(&conn, &args.extension)? {
+            let cs = db::load_cases(&conn, &args.extension, &fn_name, None)?;
+            if !cs.is_empty() {
+                cases_by_fn.insert(fn_name, cs);
+            }
+        }
+    } else {
+        bail!("batch: one of --all, --leaf, or --functions is required");
+    };
+    let functions: Vec<String> = cases_by_fn.keys().cloned().collect();
+    if functions.is_empty() {
+        println!("batch: 0 functions selected. Nothing to do.");
+        return Ok(());
+    }
+
+    let provider = args.provider.clone().unwrap_or_else(|| args.bridge.clone());
+    let cache_root = std::env::current_dir()?.join("bridges");
+
+    // Single composed bridge is used for the whole batch. Hash it
+    // once up-front rather than re-computing per function.
+    let scratch = tempfile::tempdir()?;
+    let ext_name = args.extension.clone();
+    let scratch_bridge = scratch.path().join(format!("{ext_name}.wasm"));
+    let bridge_hash = crate::hashing::sha256_hex(&args.bridge)?;
+    let provider_hash = crate::hashing::sha256_hex(&provider)?;
+    fs::copy(&args.bridge, &scratch_bridge).with_context(|| {
+        format!(
+            "copy {} -> {}",
+            args.bridge.display(),
+            scratch_bridge.display()
+        )
+    })?;
+    let _ = cache_root; // batch mode shares the composed bridge; per-fn cache irrelevant.
+
+    let host_version = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let ran_at = chrono::Utc::now().to_rfc3339();
+
+    let mut total_ran = 0usize;
+    let mut total_pass = 0i64;
+    let mut total_fail = 0i64;
+    let mut error_patterns: std::collections::HashMap<String, i64> = Default::default();
+
+    let total_cases: usize = cases_by_fn.values().map(|v| v.len()).sum();
+    let cap = args.limit.unwrap_or(total_cases);
+    eprintln!(
+        "batch: {} functions, {} cases (running up to {})",
+        functions.len(),
+        total_cases,
+        cap,
+    );
+
+    'outer: for fn_name in &functions {
+        let empty: Vec<db::TestCase> = Vec::new();
+        let cases: &Vec<db::TestCase> = cases_by_fn.get(fn_name).unwrap_or(&empty);
+        for case in cases {
+            if total_ran >= cap {
+                break 'outer;
+            }
+            let started = Instant::now();
+            let actual = execute_probe(
+                &args.ducklink,
+                scratch.path(),
+                &ext_name,
+                &case.sql_inline,
+                args.json,
+            )
+            .unwrap_or_else(|e| format!("ERROR: probe-spawn {}", e));
+            let duration_ms = started.elapsed().as_millis() as i64;
+            let expected = case.expected.trim().to_string();
+            let actual_trim = actual.trim().to_string();
+            let pass_this = expected == actual_trim;
+            let status_str = if pass_this { "pass" } else { "fail" };
+            db::insert_test_run(
+                &conn,
+                &args.extension,
+                fn_name,
+                &case.case_name,
+                status_str,
+                Some(&actual_trim),
+                duration_ms,
+                &host_version,
+                &provider_hash,
+                &bridge_hash,
+                None,
+                &ran_at,
+            )?;
+            total_ran += 1;
+            if pass_this {
+                total_pass += 1;
+            } else {
+                total_fail += 1;
+                // Bucket failing outputs by their leading "ERROR:" / prefix.
+                let bucket = fail_bucket(&actual_trim);
+                *error_patterns.entry(bucket).or_insert(0) += 1;
+                if !args.keep_going {
+                    break 'outer;
+                }
+            }
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "function": fn_name,
+                        "case": case.case_name,
+                        "status": status_str,
+                        "expected": expected,
+                        "actual": actual_trim,
+                        "duration_ms": duration_ms,
+                    })
+                );
+            } else if total_ran % 25 == 0 || !pass_this {
+                let tag = if pass_this { "PASS" } else { "FAIL" };
+                eprintln!(
+                    "  [{:>4}/{:<4}] {} {}.{} ({} ms)",
+                    total_ran, cap, tag, fn_name, case.case_name, duration_ms
+                );
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "batch summary: ran {} cases across {} functions -- {} pass, {} fail",
+        total_ran,
+        functions.len(),
+        total_pass,
+        total_fail
+    );
+    if !error_patterns.is_empty() {
+        println!("top failing patterns:");
+        let mut items: Vec<_> = error_patterns.iter().collect();
+        items.sort_by(|a, b| b.1.cmp(a.1));
+        for (pat, n) in items.iter().take(10) {
+            println!("  {:>5}  {}", n, pat);
+        }
+    }
+    Ok(())
+}
+
+/// Bucket a failing `actual` output into a coarse pattern key so
+/// the batch summary can rank the dominant failure modes without
+/// swamping the operator in unique diagnostic strings.
+fn fail_bucket(actual: &str) -> String {
+    let a = actual.trim();
+    if a.is_empty() {
+        return "<empty output>".to_string();
+    }
+    if let Some(rest) = a.strip_prefix("ERROR:") {
+        // Take the first ~60 chars post-prefix as the bucket.
+        let t = rest.trim();
+        let n = t.chars().take(60).collect::<String>();
+        return format!("ERROR: {}", n);
+    }
+    // Non-error mismatch: keep the first token as the type shape.
+    let head: String = a.chars().take(30).collect();
+    format!("mismatch: {}", head)
+}
+
 fn execute_probe(
     ducklink: &std::path::Path,
     ext_dir: &std::path::Path,

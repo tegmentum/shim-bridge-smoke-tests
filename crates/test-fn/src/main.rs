@@ -97,6 +97,45 @@ enum Cmd {
         json: bool,
     },
 
+    /// Run cases in a batch across many functions. Selection
+    /// modes:
+    ///   `--all`                    every function with cases
+    ///   `--leaf <leaf>`            functions tagged `leaf:<leaf>`
+    ///   `--functions f1,f2,...`    explicit function list
+    /// A total case cap can be applied with `--limit N` (across
+    /// all selected functions, to bound run time).
+    Batch {
+        #[arg(long)]
+        interface: PathBuf,
+        #[arg(long)]
+        extension: String,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        leaf: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        functions: Vec<String>,
+        /// Cap the number of cases run across all selected
+        /// functions. Bounds workflow duration.
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        bridge: PathBuf,
+        #[arg(long)]
+        provider: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value = "/Users/zacharywhitley/git/ducklink/target/release/ducklink"
+        )]
+        ducklink: PathBuf,
+        /// Continue on individual failures (default). Off aborts
+        /// the whole batch on the first failure.
+        #[arg(long, default_value_t = true)]
+        keep_going: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Coverage roll-up over the interface DB. No test execution.
     Coverage {
         /// Interface DB path. REQUIRED — see `seed` for why.
@@ -105,6 +144,11 @@ enum Cmd {
         /// Extension name (e.g. `postgis`).
         #[arg(long)]
         extension: String,
+        /// Roll-up axis. `leaf` groups by `tags_json` `leaf:*` tags;
+        /// `function` groups by function name; `status` (default)
+        /// gives the classic status histogram.
+        #[arg(long, default_value = "status")]
+        by: String,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -166,13 +210,47 @@ fn main() -> Result<()> {
             })
             .context("run")
         }
-        Cmd::Coverage {
+        Cmd::Batch {
             interface,
             extension,
+            all,
+            leaf,
+            functions,
+            limit,
+            bridge,
+            provider,
+            ducklink,
+            keep_going,
             json,
         } => {
             require_interface(&interface)?;
-            db::coverage(&interface, &extension, json).context("coverage")
+            runner::run_batch(runner::BatchArgs {
+                interface,
+                extension,
+                all,
+                leaf,
+                functions,
+                limit,
+                bridge,
+                provider,
+                ducklink,
+                keep_going,
+                json,
+            })
+            .context("batch")
+        }
+        Cmd::Coverage {
+            interface,
+            extension,
+            by,
+            json,
+        } => {
+            require_interface(&interface)?;
+            match by.as_str() {
+                "leaf" => db::coverage_by_leaf(&interface, &extension, json).context("coverage:leaf"),
+                "function" => db::coverage_by_function(&interface, &extension, json).context("coverage:function"),
+                _ => db::coverage(&interface, &extension, json).context("coverage"),
+            }
         }
     }
 }
