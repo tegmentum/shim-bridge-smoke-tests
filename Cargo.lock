@@ -647,6 +647,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "shim-bridge-codegen-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "shim-sql-preprocess"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "shim-bridge-codegen-core",
+ "sqlparser",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -663,6 +683,27 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "sqlparser"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05a528114c392209b3264855ad491fcce534b94a38771b0a0b97a79379275ce8"
+dependencies = [
+ "log",
+ "sqlparser_derive",
+]
+
+[[package]]
+name = "sqlparser_derive"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da5fc6819faabb412da764b99d3b713bb55083c11e7e0c00144d386cd6a1939c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "strsim"
@@ -705,6 +746,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shim-bridge-codegen-core",
+ "shim-sql-preprocess",
+ "sqlparser",
  "tempfile",
  "toml",
 ]

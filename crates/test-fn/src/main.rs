@@ -95,6 +95,12 @@ enum Cmd {
         /// Emit JSON Lines instead of the human-readable block.
         #[arg(long)]
         json: bool,
+        /// Skip the shim-sql-preprocess rewrite pass. Mirrors
+        /// scripts/run.sh's `<case>.no-preprocess` marker: use
+        /// this when the case's `sql_inline` must reach the
+        /// target parser verbatim.
+        #[arg(long, default_value_t = false)]
+        no_preprocess: bool,
     },
 
     /// Run cases in a batch across many functions. Selection
@@ -134,6 +140,10 @@ enum Cmd {
         keep_going: bool,
         #[arg(long)]
         json: bool,
+        /// Skip the shim-sql-preprocess rewrite pass. See the
+        /// `Run` variant's flag for rationale.
+        #[arg(long, default_value_t = false)]
+        no_preprocess: bool,
     },
 
     /// Coverage roll-up over the interface DB. No test execution.
@@ -211,6 +221,7 @@ fn main() -> Result<()> {
             ducklink,
             force,
             json,
+            no_preprocess,
         } => {
             require_interface(&interface)?;
             runner::run(runner::Args {
@@ -223,6 +234,7 @@ fn main() -> Result<()> {
                 ducklink,
                 force,
                 json,
+                no_preprocess,
             })
             .context("run")
         }
@@ -238,6 +250,7 @@ fn main() -> Result<()> {
             ducklink,
             keep_going,
             json,
+            no_preprocess,
         } => {
             require_interface(&interface)?;
             runner::run_batch(runner::BatchArgs {
@@ -252,6 +265,7 @@ fn main() -> Result<()> {
                 ducklink,
                 keep_going,
                 json,
+                no_preprocess,
             })
             .context("batch")
         }

@@ -7,6 +7,9 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
+use shim_bridge_codegen_core::load_plan;
+use shim_sql_preprocess::Preprocessor;
+use sqlparser::dialect::PostgreSqlDialect;
 
 use crate::{bridge_cache, db, status};
 
@@ -20,6 +23,51 @@ pub struct Args {
     pub ducklink: PathBuf,
     pub force: bool,
     pub json: bool,
+    /// Disable the shim-sql-preprocess pass before invoking
+    /// ducklink. Mirrors `scripts/run.sh`'s `<case>.no-preprocess`
+    /// marker at the CLI level for corpus SQL that must reach the
+    /// target's parser verbatim.
+    pub no_preprocess: bool,
+}
+
+/// Try to rewrite `sql` through `shim_sql_preprocess::Preprocessor`.
+/// The pre-parse text pass (operators like `&<|`, `<->`, ...) and
+/// the AST pass (casts + `&&`-family operators) both apply. If
+/// `pp` is `None`, or the preprocessor errors on the input, the
+/// original SQL is returned so the caller can still forward it to
+/// the target and observe the target's own diagnostic.
+fn maybe_preprocess(pp: Option<&Preprocessor>, sql: &str) -> String {
+    let Some(pp) = pp else { return sql.to_string() };
+    // Postgres dialect: sqlparser-rs's DuckDb dialect rejects
+    // several PG-style infix operators (`&&` etc.), and the
+    // rewrite is dialect-neutral at the output. Mirrors
+    // scripts/run.sh's `pp_dialect=postgres` for `target=duckdb`.
+    match pp.process(sql, &PostgreSqlDialect {}) {
+        Ok(rewritten) => rewritten,
+        Err(_) => sql.to_string(),
+    }
+}
+
+/// Load a `Preprocessor` for the given interface DB unless
+/// `disabled` is set. Errors during load surface as `None` — the
+/// caller still runs, just without the preprocess pass, matching
+/// scripts/run.sh's opt-in behaviour when SHIM_SQL_PREPROCESS is
+/// unset.
+fn build_preprocessor(interface: &std::path::Path, disabled: bool) -> Option<Preprocessor> {
+    if disabled {
+        return None;
+    }
+    match load_plan(interface) {
+        Ok(plan) => Some(Preprocessor::new(&plan)),
+        Err(e) => {
+            eprintln!(
+                "warn: shim-sql-preprocess disabled -- load_plan({}) failed: {}",
+                interface.display(),
+                e
+            );
+            None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -121,13 +169,22 @@ pub fn run(args: Args) -> Result<()> {
     let mut outcomes: Vec<CaseOutcome> = Vec::with_capacity(cases.len());
     let ran_at = chrono::Utc::now().to_rfc3339();
 
+    // Preprocessor pass — rewrites operators (`&&`, `&<|`, `<->`,
+    // ...) and casts (`CAST(x AS GEOMETRY)`) to shim-registered
+    // function calls before the SQL reaches the ducklink guest
+    // parser. `--no-preprocess` disables the pass entirely (mirrors
+    // scripts/run.sh's `<case>.no-preprocess` marker). Load
+    // failures downgrade to a warning + no-op preprocessor.
+    let pp = build_preprocessor(&args.interface, args.no_preprocess);
+
     for case in &cases {
         let started = Instant::now();
+        let rewritten = maybe_preprocess(pp.as_ref(), &case.sql_inline);
         let actual = execute_probe(
             &args.ducklink,
             scratch.path(),
             &ext_name,
-            &case.sql_inline,
+            &rewritten,
             args.json,
         )?;
         let duration_ms = started.elapsed().as_millis() as i64;
@@ -256,6 +313,11 @@ pub struct BatchArgs {
     pub ducklink: PathBuf,
     pub keep_going: bool,
     pub json: bool,
+    /// Disable the shim-sql-preprocess pass before invoking
+    /// ducklink. Mirrors `scripts/run.sh`'s `<case>.no-preprocess`
+    /// marker at the CLI level for corpus SQL that must reach the
+    /// target's parser verbatim.
+    pub no_preprocess: bool,
 }
 
 /// Batch case runner. Iterates the selected `(function, case)` set
@@ -384,6 +446,11 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
         cap,
     );
 
+    // Preprocessor pass — same shape as `run()`. The plan is
+    // loaded once and reused across every case in the batch;
+    // `--no-preprocess` disables the pass entirely.
+    let pp = build_preprocessor(&args.interface, args.no_preprocess);
+
     'outer: for fn_name in &functions {
         let empty: Vec<db::TestCase> = Vec::new();
         let cases: &Vec<db::TestCase> = cases_by_fn.get(fn_name).unwrap_or(&empty);
@@ -406,11 +473,12 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
                 break 'outer;
             }
             let started = Instant::now();
+            let rewritten = maybe_preprocess(pp.as_ref(), &case.sql_inline);
             let actual = execute_probe(
                 &args.ducklink,
                 scratch.path(),
                 &ext_name,
-                &case.sql_inline,
+                &rewritten,
                 args.json,
             )
             .unwrap_or_else(|e| format!("ERROR: probe-spawn {}", e));
