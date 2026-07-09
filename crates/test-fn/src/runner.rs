@@ -34,6 +34,13 @@ pub struct Args {
     /// marker at the CLI level for corpus SQL that must reach the
     /// target's parser verbatim.
     pub no_preprocess: bool,
+    /// Print the ducklink invocation (binary path, env vars, argv,
+    /// stdin SQL script) that WOULD be sent to the child process,
+    /// then skip the actual spawn and record no `test_runs` row.
+    /// Diagnostic-only; pairs with the same flag on `Batch` so the
+    /// two modes can be diffed side-by-side when a case behaves
+    /// differently under `run` vs `batch`.
+    pub print_script: bool,
 }
 
 /// Try to rewrite `sql` through `shim_sql_preprocess::Preprocessor`.
@@ -194,7 +201,14 @@ pub fn run(args: Args) -> Result<()> {
             &resolved.provider_path,
             &rewritten,
             args.json,
+            args.print_script,
         )?;
+        // `--print-script` dumped the invocation and returned an
+        // empty actual. Skip DB writes + tally arithmetic so the
+        // diagnostic mode has no persistent side effects.
+        if args.print_script {
+            continue;
+        }
         let duration_ms = started.elapsed().as_millis() as i64;
         let expected = case.expected.trim().to_string();
         let actual_trim = actual.trim().to_string();
@@ -327,6 +341,10 @@ pub struct BatchArgs {
     /// marker at the CLI level for corpus SQL that must reach the
     /// target's parser verbatim.
     pub no_preprocess: bool,
+    /// Print the ducklink invocation instead of spawning it. See
+    /// `Args::print_script` — same semantics; used to diff `run`
+    /// vs `batch` script construction side-by-side.
+    pub print_script: bool,
 }
 
 /// Batch case runner. Iterates the selected `(function, case)` set
@@ -491,8 +509,19 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
                 &provider,
                 &rewritten,
                 args.json,
+                args.print_script,
             )
             .unwrap_or_else(|e| format!("ERROR: probe-spawn {}", e));
+            // `--print-script` dumped the invocation and returned
+            // an empty actual. Skip DB writes + status arithmetic
+            // so `--print-script` on batch has no side effects.
+            if args.print_script {
+                total_ran += 1;
+                if total_ran >= cap {
+                    break 'outer;
+                }
+                continue;
+            }
             let duration_ms = started.elapsed().as_millis() as i64;
             let expected = case.expected.trim().to_string();
             let actual_trim = actual.trim().to_string();
@@ -681,15 +710,20 @@ fn fail_bucket(actual: &str) -> String {
     format!("mismatch: {}", head)
 }
 
-fn execute_probe(
-    ducklink: &std::path::Path,
+/// Build the (env, argv, stdin) triple `execute_probe` would send
+/// to ducklink. Factored out so `run` and `batch` are guaranteed
+/// to construct byte-identical invocations (the `--print-script`
+/// diagnostic prints exactly this triple) and so a future audit
+/// against `scripts/run.sh`'s sanity-smoke shape has a single
+/// canonical builder to diff against. Kept adjacent to
+/// `execute_probe` — the two ALWAYS move together.
+fn build_probe_invocation(
     ext_dir: &std::path::Path,
     ext_name: &str,
     bridge_path: &std::path::Path,
     provider_path: &std::path::Path,
     probe_sql: &str,
-    json: bool,
-) -> Result<String> {
+) -> (Vec<(String, String)>, Vec<String>, String) {
     let mut script = String::new();
     script.push_str(&format!("LOAD {};\n", ext_name));
     script.push_str(".mode csv\n");
@@ -699,6 +733,80 @@ fn execute_probe(
     } else {
         script.push_str(probe_sql);
         script.push('\n');
+    }
+    let env: Vec<(String, String)> = vec![
+        ("DUCKLINK_AUTOLOAD".to_string(), String::new()),
+        (
+            "DUCKLINK_SUB_EXT_BRIDGES".to_string(),
+            format!("{}={}", ext_name, bridge_path.display()),
+        ),
+        (
+            "DUCKLINK_SUB_EXT_PREBUILT".to_string(),
+            format!("{}={}", ext_name, provider_path.display()),
+        ),
+    ];
+    let argv: Vec<String> = vec![
+        "--extensions-dir".to_string(),
+        ext_dir.display().to_string(),
+        "--".to_string(),
+        "duckdb-cli".to_string(),
+        ":memory:".to_string(),
+    ];
+    (env, argv, script)
+}
+
+/// Human-readable dump of the invocation `build_probe_invocation`
+/// produced — one line per env entry, one line per argv token, and
+/// the SQL script indented under a `--- stdin ---` banner. Emitted
+/// on `--print-script` so `run` and `batch` can be diffed with a
+/// straight `diff` when they behave differently on the same case.
+fn format_probe_dump(
+    ducklink: &std::path::Path,
+    env: &[(String, String)],
+    argv: &[String],
+    script: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "--- ducklink invocation ---");
+    let _ = writeln!(&mut out, "bin: {}", ducklink.display());
+    for (k, v) in env {
+        let _ = writeln!(&mut out, "env: {}={}", k, v);
+    }
+    let _ = write!(&mut out, "argv:");
+    for a in argv {
+        let _ = write!(&mut out, " {}", a);
+    }
+    let _ = writeln!(&mut out);
+    let _ = writeln!(&mut out, "--- stdin ---");
+    for line in script.lines() {
+        let _ = writeln!(&mut out, "  {}", line);
+    }
+    let _ = writeln!(&mut out, "--- end ---");
+    out
+}
+
+fn execute_probe(
+    ducklink: &std::path::Path,
+    ext_dir: &std::path::Path,
+    ext_name: &str,
+    bridge_path: &std::path::Path,
+    provider_path: &std::path::Path,
+    probe_sql: &str,
+    json: bool,
+    print_script: bool,
+) -> Result<String> {
+    let (env, argv, script) =
+        build_probe_invocation(ext_dir, ext_name, bridge_path, provider_path, probe_sql);
+
+    // Diagnostic short-circuit: dump the invocation to stdout and
+    // return an empty actual so the caller can compare `run` vs
+    // `batch` without any subprocess side effects. Skips the child
+    // spawn AND the `test_runs` insert — the outer loop treats the
+    // empty actual as a "no-op" outcome for diagnostic mode.
+    if print_script {
+        print!("{}", format_probe_dump(ducklink, &env, &argv, &script));
+        return Ok(String::new());
     }
 
     // Phase A dynlink wiring. `ducklink-host`'s `SubExtLoader`
@@ -724,19 +832,20 @@ fn execute_probe(
     // kept as a belt-and-braces fallback for pure-monolith modes
     // that don't set the sub-ext env vars, but the sub-ext branch
     // takes precedence inside `ducklink-host::ExtensionManager`.
-    let sub_ext_bridges = format!("{}={}", ext_name, bridge_path.display());
-    let sub_ext_prebuilt = format!("{}={}", ext_name, provider_path.display());
-
+    // Env + argv now come from the shared `build_probe_invocation`
+    // builder above so `run` and `batch` cannot drift on the ducklink
+    // wire shape. The struct-of-arrays layout is easier to read as
+    // a diff on `--print-script` output than a chain of `.env()` /
+    // `.arg()` calls at the call site.
     let mut cmd = Command::new(ducklink);
-    cmd.env("DUCKLINK_AUTOLOAD", "")
-        .env("DUCKLINK_SUB_EXT_BRIDGES", &sub_ext_bridges)
-        .env("DUCKLINK_SUB_EXT_PREBUILT", &sub_ext_prebuilt)
-        .arg("--extensions-dir")
-        .arg(ext_dir)
-        .arg("--")
-        .arg("duckdb-cli")
-        .arg(":memory:")
-        .stdin(Stdio::piped())
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    for a in &argv {
+        cmd.arg(a);
+    }
+    let _ = ext_dir; // now consumed by argv builder above
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd

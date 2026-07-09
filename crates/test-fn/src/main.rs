@@ -115,6 +115,14 @@ enum Cmd {
         /// target parser verbatim.
         #[arg(long, default_value_t = false)]
         no_preprocess: bool,
+        /// Print the ducklink invocation (bin path, env, argv,
+        /// stdin SQL) for each selected case and exit without
+        /// spawning ducklink or writing to `test_runs`. Diagnostic
+        /// flag: pairs with `batch --print-script` so the two
+        /// modes can be diffed byte-for-byte when a case behaves
+        /// differently under `run` vs `batch`.
+        #[arg(long, default_value_t = false)]
+        print_script: bool,
     },
 
     /// Run cases in a batch across many functions. Selection
@@ -161,6 +169,11 @@ enum Cmd {
         /// `Run` variant's flag for rationale.
         #[arg(long, default_value_t = false)]
         no_preprocess: bool,
+        /// Print the ducklink invocation for each case and exit
+        /// without spawning ducklink. See the `Run` variant's
+        /// flag for rationale.
+        #[arg(long, default_value_t = false)]
+        print_script: bool,
     },
 
     /// Coverage roll-up over the interface DB. No test execution.
@@ -240,6 +253,7 @@ fn main() -> Result<()> {
             force,
             json,
             no_preprocess,
+            print_script,
         } => {
             require_interface(&interface)?;
             runner::run(runner::Args {
@@ -254,6 +268,7 @@ fn main() -> Result<()> {
                 force,
                 json,
                 no_preprocess,
+                print_script,
             })
             .context("run")
         }
@@ -271,6 +286,7 @@ fn main() -> Result<()> {
             keep_going,
             json,
             no_preprocess,
+            print_script,
         } => {
             require_interface(&interface)?;
             runner::run_batch(runner::BatchArgs {
@@ -287,6 +303,7 @@ fn main() -> Result<()> {
                 keep_going,
                 json,
                 no_preprocess,
+                print_script,
             })
             .context("batch")
         }
