@@ -206,6 +206,7 @@ fn main() -> Result<()> {
     let mut skipped_no_expected = 0usize;
     let mut skipped_binary = 0usize;
     let mut files_no_expected = 0usize;
+    let mut flagged_fixture_bad = 0usize;
 
     for sql_path in &sql_files {
         let raw = match std::fs::read_to_string(sql_path) {
@@ -269,6 +270,13 @@ fn main() -> Result<()> {
                 skipped_pg_only += 1;
                 continue;
             }
+            // Known-broken upstream fixtures (Fix 4). We still
+            // emit the row so coverage bookkeeping stays honest
+            // — the shim can't execute these, but the fact that
+            // the scraper saw them and tagged them as such is
+            // itself the deliverable.
+            let fixture_bad_pattern = skiplist::matches_fixture_bad(&lc);
+            let is_fixture_bad = fixture_bad_pattern.is_some();
             let top_calls = parse::extract_top_calls(&stmt.text, &*predicate);
             if top_calls.is_empty() {
                 skipped_no_top += 1;
@@ -347,6 +355,13 @@ fn main() -> Result<()> {
                         tags.push(format!("pg_only_pattern:{}", pat));
                     }
                 }
+                if is_fixture_bad {
+                    tags.push("fixture_bad".to_string());
+                    if let Some(pat) = fixture_bad_pattern {
+                        tags.push(format!("fixture_bad_pattern:{}", pat));
+                    }
+                    flagged_fixture_bad += 1;
+                }
                 for other in &top_calls {
                     if other.function != tc.function {
                         tags.push(format!("inner:{}", other.function));
@@ -385,6 +400,7 @@ fn main() -> Result<()> {
     println!("  skipped (no label):           {}", skipped_no_label);
     println!("  skipped (no expected row):    {}", skipped_no_expected);
     println!("  skipped (binary):             {}", skipped_binary);
+    println!("  flagged (fixture_bad):        {}", flagged_fixture_bad);
 
     if cli.dry_run {
         return Ok(());
