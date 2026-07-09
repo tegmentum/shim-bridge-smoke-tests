@@ -1,0 +1,35 @@
+# B1 starter cases -- five hand-rolled per-function probes that
+# exercise the postgis-ducklink monolith bridge.
+#
+# Design note: the current ducklink bridge only reliably binds
+# BLOB-returning postgis scalars when their result is fed
+# through the explicit `::GEOMETRY` cast wrapper -- see
+# `~/git/postgis-shim-interface/docs/DISCOVERY-UX.md` for the
+# underlying binder-quirk analysis. Cases therefore probe the
+# function under test by wrapping its output in
+# `ST_AsText(<expr>::GEOMETRY)`.
+
+[[st_makepoint]]
+name = "xy_basic"
+sql = "SELECT ST_AsText(ST_MakePoint(1.0, 2.0)::GEOMETRY)"
+expects = "POINT (1 2)"
+
+[[st_geomfromtext]]
+name = "point_wkt_roundtrip"
+sql = "SELECT ST_AsText(ST_GeomFromText('POINT(5 6)')::GEOMETRY)"
+expects = "POINT (5 6)"
+
+[[st_astext]]
+name = "point_cast_from_wkt_literal"
+sql = "SELECT ST_AsText('POINT(1 2)'::GEOMETRY)"
+expects = "POINT (1 2)"
+
+[[st_point]]
+name = "xy_basic"
+sql = "SELECT ST_AsText(ST_Point(3.0, 4.0)::GEOMETRY)"
+expects = "POINT (3 4)"
+
+[[st_pointfromtext]]
+name = "point_wkt_roundtrip"
+sql = "SELECT ST_AsText(ST_PointFromText('POINT(9 10)')::GEOMETRY)"
+expects = "POINT (9 10)"

@@ -1,1 +1,4 @@
 *.swp
+target/
+bridges/*
+!bridges/.gitkeep
