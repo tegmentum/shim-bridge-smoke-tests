@@ -341,6 +341,32 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
     let mut total_pass = 0i64;
     let mut total_fail = 0i64;
     let mut error_patterns: std::collections::HashMap<String, i64> = Default::default();
+    // Per-function running tallies + a flag tracking whether we ran
+    // *every* selected case for the function (a partial run gated
+    // by `--limit` or `!keep_going` must NOT promote the status).
+    #[derive(Default)]
+    struct FnStats {
+        pass: i64,
+        fail: i64,
+        planned: usize,
+        ran: usize,
+    }
+    let mut fn_stats: std::collections::BTreeMap<String, FnStats> =
+        std::collections::BTreeMap::new();
+    for (fname, cases) in &cases_by_fn {
+        fn_stats.entry(fname.clone()).or_default().planned = cases.len();
+    }
+    // Batch mode uses the composed monolith bridge for every
+    // function it runs. mark_verified needs the function's
+    // signature/implementation hash from `scalars`, so cache them
+    // up-front rather than reload per-case.
+    let scalar_rows: std::collections::HashMap<String, db::FunctionRow> = functions
+        .iter()
+        .filter_map(|f| match db::load_scalar(&conn, &args.extension, f) {
+            Ok(Some(r)) => Some((f.clone(), r)),
+            _ => None,
+        })
+        .collect();
 
     let total_cases: usize = cases_by_fn.values().map(|v| v.len()).sum();
     let cap = args.limit.unwrap_or(total_cases);
@@ -387,6 +413,15 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
                 &ran_at,
             )?;
             total_ran += 1;
+            {
+                let s = fn_stats.entry(fn_name.clone()).or_default();
+                s.ran += 1;
+                if pass_this {
+                    s.pass += 1;
+                } else {
+                    s.fail += 1;
+                }
+            }
             if pass_this {
                 total_pass += 1;
             } else {
@@ -420,6 +455,56 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
         }
     }
 
+    // §7 promotion, batch flavour. Per-fn `run` mode calls
+    // `status::mark_verified` / `status::mark_failed` after each
+    // function's suite finishes; batch mode used to skip the
+    // promotion entirely, leaving `scalars.status` stuck at
+    // `implemented_unverified` even after all-pass and breaking the
+    // hash-scoped cache guarantees. We now apply the same rule:
+    //
+    //   ran == planned && fail == 0 && pass > 0  -> mark_verified
+    //   ran == planned && fail > 0               -> mark_failed
+    //   ran < planned                            -> no-op (partial)
+    //   ran == 0                                 -> no-op
+    //
+    // A partial run (cap hit, --keep-going off after a fail, or
+    // batch broke out early) leaves status untouched so the next
+    // full run has a chance to promote.
+    let mut promoted_verified = 0usize;
+    let mut promoted_failed = 0usize;
+    for (fname, s) in &fn_stats {
+        if s.ran == 0 || s.ran < s.planned {
+            continue;
+        }
+        let row = match scalar_rows.get(fname) {
+            Some(r) => r,
+            None => continue,
+        };
+        let sig = row.signature_hash.clone().unwrap_or_default();
+        let im = row.implementation_hash.clone().unwrap_or_default();
+        if s.fail == 0 && s.pass > 0 {
+            db::mark_verified(
+                &conn,
+                &args.extension,
+                fname,
+                &sig,
+                &im,
+                row.last_seen_upstream_version.as_deref(),
+                &ran_at,
+            )?;
+            promoted_verified += 1;
+        } else if s.fail > 0 {
+            db::mark_failed(
+                &conn,
+                &args.extension,
+                fname,
+                &format!("batch: {} pass, {} fail", s.pass, s.fail),
+                &ran_at,
+            )?;
+            promoted_failed += 1;
+        }
+    }
+
     println!();
     println!(
         "batch summary: ran {} cases across {} functions -- {} pass, {} fail",
@@ -427,6 +512,10 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
         functions.len(),
         total_pass,
         total_fail
+    );
+    println!(
+        "status promotions: {} verified, {} failed (partial runs left untouched)",
+        promoted_verified, promoted_failed
     );
     if !error_patterns.is_empty() {
         println!("top failing patterns:");
