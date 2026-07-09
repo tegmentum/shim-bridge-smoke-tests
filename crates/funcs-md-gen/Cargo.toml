@@ -1,0 +1,17 @@
+[package]
+name = "funcs-md-gen"
+version = "0.1.0"
+edition = "2021"
+description = "Auto-generate FUNCTIONS.md status doc from a shim-interface catalog (B3)."
+license = "Apache-2.0"
+
+[[bin]]
+name = "funcs-md-gen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
