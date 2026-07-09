@@ -16,6 +16,12 @@ use crate::{bridge_cache, db, status};
 pub struct Args {
     pub interface: PathBuf,
     pub extension: String,
+    /// Optional sub-extension name (e.g. `postgis_core`). Defaults to
+    /// `extension` when None — sub_ext must match the bridge's baked-in
+    /// PROVIDER_ID (`<sub_ext>-composed`) or the DUCKLINK_SUB_EXT_BRIDGES
+    /// key/LOAD name will mismatch the linker::resolve_by_id lookup at
+    /// dispatch time. See #78.
+    pub sub_ext: Option<String>,
     pub function: String,
     pub case: Option<String>,
     pub bridge: PathBuf,
@@ -149,7 +155,7 @@ pub fn run(args: Args) -> Result<()> {
     // bridge under its canonical name. Design §5 provider hash
     // stamp uses the *same* file for MVP monolith mode.
     let scratch = tempfile::tempdir()?;
-    let ext_name = args.extension.clone();
+    let ext_name = args.sub_ext.clone().unwrap_or_else(|| args.extension.clone());
     let scratch_bridge = scratch.path().join(format!("{ext_name}.wasm"));
     fs::copy(&resolved.bridge_path, &scratch_bridge).with_context(|| {
         format!(
@@ -306,6 +312,7 @@ pub fn run(args: Args) -> Result<()> {
 pub struct BatchArgs {
     pub interface: PathBuf,
     pub extension: String,
+    pub sub_ext: Option<String>,
     pub all: bool,
     pub leaf: Option<String>,
     pub functions: Vec<String>,
@@ -385,7 +392,7 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
     // Single composed bridge is used for the whole batch. Hash it
     // once up-front rather than re-computing per function.
     let scratch = tempfile::tempdir()?;
-    let ext_name = args.extension.clone();
+    let ext_name = args.sub_ext.clone().unwrap_or_else(|| args.extension.clone());
     let scratch_bridge = scratch.path().join(format!("{ext_name}.wasm"));
     let bridge_hash = crate::hashing::sha256_hex(&args.bridge)?;
     let provider_hash = crate::hashing::sha256_hex(&provider)?;

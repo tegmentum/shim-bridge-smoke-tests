@@ -69,6 +69,13 @@ enum Cmd {
         /// Extension name (e.g. `postgis`).
         #[arg(long)]
         extension: String,
+        /// Sub-extension name for dynlink bridges (e.g. `postgis_core`).
+        /// Used as the key for DUCKLINK_SUB_EXT_BRIDGES + PREBUILT and
+        /// as the `LOAD <sub_ext>` name. Bridge's hardcoded PROVIDER_ID
+        /// is `<sub_ext>-composed`. Defaults to `extension` for
+        /// backward-compat with pure-monolith mode.
+        #[arg(long)]
+        sub_ext: Option<String>,
         /// Function name (canonical, lowercase).
         #[arg(long)]
         function: String,
@@ -78,7 +85,7 @@ enum Cmd {
         case: Option<String>,
         /// Bridge wasm. In dynlink mode this is the per-sub-ext
         /// `*_bridge_dynlink.wasm` component; ducklink registers
-        /// it under `DUCKLINK_SUB_EXT_BRIDGES=<ext>=<bridge>`.
+        /// it under `DUCKLINK_SUB_EXT_BRIDGES=<sub_ext>=<bridge>`.
         #[arg(long)]
         bridge: PathBuf,
         /// Provider wasm. In dynlink mode this is the composed
@@ -122,6 +129,9 @@ enum Cmd {
         interface: PathBuf,
         #[arg(long)]
         extension: String,
+        /// Sub-extension name for dynlink bridges. See `Run` variant.
+        #[arg(long)]
+        sub_ext: Option<String>,
         #[arg(long)]
         all: bool,
         #[arg(long)]
@@ -221,6 +231,7 @@ fn main() -> Result<()> {
         Cmd::Run {
             interface,
             extension,
+            sub_ext,
             function,
             case,
             bridge,
@@ -234,6 +245,7 @@ fn main() -> Result<()> {
             runner::run(runner::Args {
                 interface,
                 extension,
+                sub_ext,
                 function,
                 case,
                 bridge,
@@ -248,6 +260,7 @@ fn main() -> Result<()> {
         Cmd::Batch {
             interface,
             extension,
+            sub_ext,
             all,
             leaf,
             functions,
@@ -263,6 +276,7 @@ fn main() -> Result<()> {
             runner::run_batch(runner::BatchArgs {
                 interface,
                 extension,
+                sub_ext,
                 all,
                 leaf,
                 functions,
