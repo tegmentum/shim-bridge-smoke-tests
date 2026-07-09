@@ -149,6 +149,12 @@ enum Cmd {
         /// gives the classic status histogram.
         #[arg(long, default_value = "status")]
         by: String,
+        /// Include `pg_only`-tagged cases in the primary rollup
+        /// counters. Only meaningful with `--by leaf`. Off by
+        /// default because pg_only rows inflate leaf totals with
+        /// probes the shim cannot execute.
+        #[arg(long, default_value_t = false)]
+        show_pg_only: bool,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -243,12 +249,15 @@ fn main() -> Result<()> {
             interface,
             extension,
             by,
+            show_pg_only,
             json,
         } => {
             require_interface(&interface)?;
             match by.as_str() {
-                "leaf" => db::coverage_by_leaf(&interface, &extension, json).context("coverage:leaf"),
-                "function" => db::coverage_by_function(&interface, &extension, json).context("coverage:function"),
+                "leaf" => db::coverage_by_leaf(&interface, &extension, json, show_pg_only)
+                    .context("coverage:leaf"),
+                "function" => db::coverage_by_function(&interface, &extension, json)
+                    .context("coverage:function"),
                 _ => db::coverage(&interface, &extension, json).context("coverage"),
             }
         }

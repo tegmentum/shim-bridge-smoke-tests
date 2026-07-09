@@ -21,6 +21,7 @@
 mod emit;
 mod normalise;
 mod parse;
+mod preprocess;
 mod skiplist;
 
 use std::collections::{HashMap, HashSet};
@@ -80,6 +81,20 @@ struct Cli {
     #[arg(long)]
     include: Option<String>,
 
+    /// Path to the extension's `*-catalog.toml`. When set, every
+    /// emitted case is tagged with the owning `leaf:<leaf>` (or
+    /// `leaf:orphan` if the function is not owned by any leaf).
+    /// Defaults to `~/git/<extension>-shim-interface/<extension>-catalog.toml`.
+    #[arg(long)]
+    catalog: Option<PathBuf>,
+
+    /// If set, emit pg_only-matching cases with a `pg_only` tag
+    /// instead of dropping them. `test-fn` skips these in batch
+    /// mode by default; use `--show-pg-only` in coverage reports
+    /// to inspect the bucket.
+    #[arg(long, default_value_t = true)]
+    emit_pg_only: bool,
+
     /// Verbose logging.
     #[arg(long, short)]
     verbose: bool,
@@ -136,6 +151,47 @@ fn main() -> Result<()> {
     let prefix_pred = parse::default_prefix_predicate(&ext_name);
     let predicate: Box<dyn Fn(&str) -> bool + Send + Sync> =
         Box::new(move |ident: &str| inventory_names.contains(ident) || prefix_pred(ident));
+
+    // Catalog-driven leaf tagging (Fix 3). If --catalog is not
+    // explicitly provided, guess the canonical path derived from
+    // --insert-into's parent directory, then fall back to the
+    // conventional `~/git/<extension>-shim-interface/<extension>-catalog.toml`.
+    let catalog_path = cli.catalog.clone().or_else(|| {
+        cli.insert_into.as_ref().and_then(|db| {
+            let parent = db.parent()?;
+            let name = format!("{ext_name}-catalog.toml");
+            let p = parent.join(&name);
+            if p.exists() {
+                Some(p)
+            } else {
+                None
+            }
+        })
+    });
+    let leaf_map: HashMap<String, String> = match &catalog_path {
+        Some(p) => match preprocess::load_function_leaf_map(p) {
+            Ok(m) => {
+                if cli.verbose {
+                    eprintln!(
+                        "catalog: {} functions mapped to leaves from {}",
+                        m.len(),
+                        p.display()
+                    );
+                }
+                m
+            }
+            Err(e) => {
+                eprintln!("warn: catalog load failed ({}): {}", p.display(), e);
+                HashMap::new()
+            }
+        },
+        None => {
+            if cli.verbose {
+                eprintln!("no catalog found; leaf tagging disabled");
+            }
+            HashMap::new()
+        }
+    };
 
     let sql_files = collect_sql_files(&cli.regress_dir, cli.extension, &cli.include, &cli.exclude)?;
     if cli.verbose {
@@ -204,7 +260,12 @@ fn main() -> Result<()> {
             if !lc.trim_start().starts_with("select") {
                 continue;
             }
-            if let Some(_pat) = skiplist::matches_pg_only(&lc) {
+            // pg_only detection now flags the case instead of
+            // dropping it (Fix 5). Passing `is_pg_only` down keeps
+            // the flag close to the emit site.
+            let pg_only_pattern = skiplist::matches_pg_only(&lc);
+            let is_pg_only = pg_only_pattern.is_some();
+            if is_pg_only && !cli.emit_pg_only {
                 skipped_pg_only += 1;
                 continue;
             }
@@ -266,8 +327,25 @@ fn main() -> Result<()> {
 
                 let mut tags: Vec<String> =
                     vec![source_tag.clone()];
-                if let Some(bt) = &bulk_tag {
-                    tags.push(bt.clone());
+                // Catalog-driven leaf tag (Fix 3). Prefer the
+                // canonical catalog assignment; fall back to the
+                // scraper's per-filename bulk-tag when the catalog
+                // has no mapping (unknown function or catalog not
+                // loaded). Guarantees every emitted row carries at
+                // least one `leaf:*` tag so coverage-by-leaf never
+                // dumps rows into `<untagged>`.
+                let catalog_leaf =
+                    leaf_map.get(&tc.function.to_ascii_lowercase()).cloned();
+                match (&catalog_leaf, &bulk_tag) {
+                    (Some(leaf), _) => tags.push(format!("leaf:{}", leaf)),
+                    (None, Some(bt)) => tags.push(bt.clone()),
+                    (None, None) => tags.push("leaf:orphan".to_string()),
+                }
+                if is_pg_only {
+                    tags.push("pg_only".to_string());
+                    if let Some(pat) = pg_only_pattern {
+                        tags.push(format!("pg_only_pattern:{}", pat));
+                    }
                 }
                 for other in &top_calls {
                     if other.function != tc.function {
@@ -278,7 +356,11 @@ fn main() -> Result<()> {
                 // Strip the leading label literal so the probe
                 // returns only the expression under test (not the
                 // hand-authored label as an extra CSV column).
-                let probe_sql = parse::strip_leading_label(&stmt.text);
+                let stripped = parse::strip_leading_label(&stmt.text);
+                // Inject `::GEOMETRY` casts on WKT string literals
+                // so the DuckDB binder matches the shim's
+                // `(postgis.geometry, ...)` signatures (Fix 1).
+                let probe_sql = preprocess::inject_geometry_casts(&stripped);
                 cases.push(NormalisedCase {
                     extension: ext_name.clone(),
                     function_name: tc.function.clone(),

@@ -75,6 +75,21 @@ pub fn load_cases(
     function: &str,
     only: Option<&str>,
 ) -> Result<Vec<TestCase>> {
+    load_cases_ex(conn, extension, function, only, true)
+}
+
+/// Extended `load_cases` variant with an explicit `include_pg_only`
+/// switch. Kept as a separate entry point so historical callers
+/// (`test-fn run` per-function mode) continue to see every case for
+/// the function while batch selection paths can opt out of the
+/// pg_only bucket.
+pub fn load_cases_ex(
+    conn: &Connection,
+    extension: &str,
+    function: &str,
+    only: Option<&str>,
+    include_pg_only: bool,
+) -> Result<Vec<TestCase>> {
     let mut sql = String::from(
         "SELECT extension, function_name, case_name,
                 COALESCE(sql_inline, ''), COALESCE(expected, ''),
@@ -84,6 +99,9 @@ pub fn load_cases(
     );
     if only.is_some() {
         sql.push_str(" AND case_name = ?3");
+    }
+    if !include_pg_only {
+        sql.push_str(" AND tags_json NOT LIKE '%\"pg_only\"%'");
     }
     sql.push_str(" ORDER BY case_name");
     let mut stmt = conn.prepare(&sql)?;
@@ -244,21 +262,36 @@ pub fn list_functions_by_leaf(
 /// operator asked for a `--leaf` slice and wants only the leaf's
 /// own cases (not the transitive union of every case for every
 /// function the leaf touched).
+///
+/// `include_pg_only == false` (the default in batch mode) drops
+/// rows carrying the `pg_only` tag — these are pg-catalog-specific
+/// probes the scraper preserved for coverage bookkeeping but that
+/// the shim cannot execute meaningfully. Set to `true` to keep
+/// them (useful when auditing the pg_only bucket by leaf).
 pub fn load_cases_by_leaf(
     conn: &Connection,
     extension: &str,
     leaf: &str,
+    include_pg_only: bool,
 ) -> Result<Vec<TestCase>> {
     let tag = format!("\"leaf:{}\"", leaf);
-    let mut stmt = conn.prepare(
+    let base = String::from(
         "SELECT extension, function_name, case_name,
                 COALESCE(sql_inline, ''), COALESCE(expected, ''),
                 source
            FROM test_cases
           WHERE extension = ?1
-            AND tags_json LIKE '%' || ?2 || '%'
-          ORDER BY function_name, case_name",
-    )?;
+            AND tags_json LIKE '%' || ?2 || '%'",
+    );
+    let sql = if include_pg_only {
+        format!("{} ORDER BY function_name, case_name", base)
+    } else {
+        format!(
+            "{} AND tags_json NOT LIKE '%\"pg_only\"%' ORDER BY function_name, case_name",
+            base
+        )
+    };
+    let mut stmt = conn.prepare(&sql)?;
     let cases: Vec<TestCase> = stmt
         .query_map(params![extension, tag], row_to_case)?
         .collect::<Result<_, _>>()?;
@@ -268,7 +301,12 @@ pub fn load_cases_by_leaf(
 /// Coverage grouped by `leaf:*` tag. For each leaf we roll up:
 /// total cases, cases with at least one passing run, cases with
 /// at least one failing run (no pass yet), untested cases.
-pub fn coverage_by_leaf(interface_db: &Path, extension: &str, json: bool) -> Result<()> {
+pub fn coverage_by_leaf(
+    interface_db: &Path,
+    extension: &str,
+    json: bool,
+    show_pg_only: bool,
+) -> Result<()> {
     let conn = open(interface_db)?;
     // Pull all cases with their tags.
     let mut stmt = conn.prepare(
@@ -292,6 +330,7 @@ pub fn coverage_by_leaf(interface_db: &Path, extension: &str, json: bool) -> Res
         pass: i64,
         fail: i64,
         untested: i64,
+        pg_only: i64,
     }
     let mut by_leaf: std::collections::BTreeMap<String, LeafAgg> =
         std::collections::BTreeMap::new();
@@ -308,6 +347,25 @@ pub fn coverage_by_leaf(interface_db: &Path, extension: &str, json: bool) -> Res
         let (_fn_name, _case_name, tags_json, pass_runs, fail_runs) = row?;
         let tags: Vec<String> =
             serde_json::from_str(&tags_json).unwrap_or_default();
+        let is_pg_only = tags.iter().any(|t| t == "pg_only");
+        // Skip pg_only cases from the primary leaf rollup unless
+        // the operator asked for them — they inflate leaf totals
+        // with rows the shim can't execute.
+        if is_pg_only && !show_pg_only {
+            let mut charged = false;
+            for t in &tags {
+                if let Some(leaf) = t.strip_prefix("leaf:") {
+                    let a = by_leaf.entry(leaf.to_string()).or_default();
+                    a.pg_only += 1;
+                    charged = true;
+                }
+            }
+            if !charged {
+                let a = by_leaf.entry("<untagged>".to_string()).or_default();
+                a.pg_only += 1;
+            }
+            continue;
+        }
         let mut had_leaf = false;
         for t in &tags {
             if let Some(leaf) = t.strip_prefix("leaf:") {
@@ -321,6 +379,9 @@ pub fn coverage_by_leaf(interface_db: &Path, extension: &str, json: bool) -> Res
                 } else {
                     a.untested += 1;
                 }
+                if is_pg_only {
+                    a.pg_only += 1;
+                }
             }
         }
         if !had_leaf {
@@ -333,11 +394,15 @@ pub fn coverage_by_leaf(interface_db: &Path, extension: &str, json: bool) -> Res
             } else {
                 a.untested += 1;
             }
+            if is_pg_only {
+                a.pg_only += 1;
+            }
         }
     }
     if json {
         let obj: serde_json::Value = serde_json::json!({
             "extension": extension,
+            "show_pg_only": show_pg_only,
             "by_leaf": by_leaf.iter().map(|(k, v)| {
                 let coverage_pct = if v.cases > 0 {
                     100.0 * (v.pass as f64) / (v.cases as f64)
@@ -348,20 +413,26 @@ pub fn coverage_by_leaf(interface_db: &Path, extension: &str, json: bool) -> Res
                     "pass": v.pass,
                     "fail": v.fail,
                     "untested": v.untested,
+                    "pg_only": v.pg_only,
                     "coverage_pct": coverage_pct,
                 })
             }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&obj)?);
     } else {
-        println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>10}",
-            "LEAF", "CASES", "PASS", "FAIL", "UNTESTED", "COVERAGE");
+        println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>10}",
+            "LEAF", "CASES", "PASS", "FAIL", "UNTESTED", "PG-ONLY", "COVERAGE");
         for (leaf, a) in &by_leaf {
             let pct = if a.cases > 0 {
                 100.0 * (a.pass as f64) / (a.cases as f64)
             } else { 0.0 };
-            println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>9.1}%",
-                leaf, a.cases, a.pass, a.fail, a.untested, pct);
+            println!("{:<28} {:>7} {:>7} {:>7} {:>8} {:>8} {:>9.1}%",
+                leaf, a.cases, a.pass, a.fail, a.untested, a.pg_only, pct);
+        }
+        if !show_pg_only {
+            println!();
+            println!("(pg_only rows are excluded from CASES/PASS/FAIL/UNTESTED; ");
+            println!(" re-run with --show-pg-only to include them.)");
         }
     }
     Ok(())

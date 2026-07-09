@@ -279,13 +279,19 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
     if !args.functions.is_empty() {
         for f in &args.functions {
             let fl = f.to_lowercase();
-            let cs = db::load_cases(&conn, &args.extension, &fl, None)?;
+            // Batch mode drops pg_only rows (see load_cases_by_leaf
+            // rationale). Per-function `run` still calls the
+            // pg_only-inclusive `load_cases` path.
+            let cs = db::load_cases_ex(&conn, &args.extension, &fl, None, false)?;
             if !cs.is_empty() {
                 cases_by_fn.insert(fl, cs);
             }
         }
     } else if let Some(leaf) = &args.leaf {
-        let cs = db::load_cases_by_leaf(&conn, &args.extension, leaf)?;
+        // Batch mode drops pg_only rows by default; they are
+        // preserved in `test_cases` for coverage bookkeeping but
+        // the shim cannot execute them meaningfully.
+        let cs = db::load_cases_by_leaf(&conn, &args.extension, leaf, false)?;
         for c in cs {
             cases_by_fn
                 .entry(c.function_name.clone())
@@ -294,7 +300,8 @@ pub fn run_batch(args: BatchArgs) -> Result<()> {
         }
     } else if args.all {
         for fn_name in db::list_functions_with_cases(&conn, &args.extension)? {
-            let cs = db::load_cases(&conn, &args.extension, &fn_name, None)?;
+            let cs =
+                db::load_cases_ex(&conn, &args.extension, &fn_name, None, false)?;
             if !cs.is_empty() {
                 cases_by_fn.insert(fn_name, cs);
             }
@@ -532,6 +539,26 @@ fn execute_probe(
             .unwrap_or("internal error");
         return Ok(format!("ERROR: {}", line.trim()));
     }
+    // DuckDB CLI returns exit=0 even on SQL errors (it keeps the
+    // REPL alive), so the process-level branch above misses the
+    // most common failure mode: `Catalog Error: No function
+    // matches ...`. Detect the well-known DuckDB error prefixes
+    // on either stream and reframe them into the same
+    // `ERROR: exit=0 stderr=<last-3-lines>` shape B1.1 introduced,
+    // so the batch runner's `actual` column is uniformly greppable.
+    if let Some(err_stream) = classify_duckdb_error(&stdout, &stderr) {
+        let tail = err_stream
+            .lines()
+            .filter(|l| looks_like_duckdb_error(l))
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Ok(format!("ERROR: exit=Some(0) stderr={}", tail));
+    }
     // Filter stdout: drop lines starting with `[` (ducklink
     // extension-manager chatter), prompt sigils, and blank lines.
     // Return the last non-noise line.
@@ -557,6 +584,48 @@ fn execute_probe(
         .unwrap_or_default()
         .to_string();
     Ok(last)
+}
+
+/// Well-known DuckDB error prefixes. When one of these appears on
+/// either stream we treat the run as a failed probe regardless of
+/// exit code.
+const DUCKDB_ERROR_PREFIXES: &[&str] = &[
+    "Catalog Error:",
+    "Parser Error:",
+    "Binder Error:",
+    "Conversion Error:",
+    "Invalid Input Error:",
+    "IO Error:",
+    "Constraint Error:",
+    "Transaction Error:",
+    "Not implemented Error:",
+    "Serialization Error:",
+    "Out of Memory Error:",
+    "Dependency Error:",
+    "Permission Error:",
+    "Type Error:",
+    "Runtime Error:",
+    "Error:",
+];
+
+/// True if `line` starts with any DuckDB error prefix (after left
+/// trimming).
+fn looks_like_duckdb_error(line: &str) -> bool {
+    let t = line.trim_start();
+    DUCKDB_ERROR_PREFIXES.iter().any(|p| t.starts_with(p))
+}
+
+/// If either stream contains a recognised DuckDB error prefix,
+/// return the stream text containing it (stderr preferred). The
+/// caller then extracts a compact tail for the `actual` column.
+fn classify_duckdb_error(stdout: &str, stderr: &str) -> Option<String> {
+    if stderr.lines().any(looks_like_duckdb_error) {
+        Some(stderr.to_string())
+    } else if stdout.lines().any(looks_like_duckdb_error) {
+        Some(stdout.to_string())
+    } else {
+        None
+    }
 }
 
 /// Strip a leading `D> ` (repeated ducklink guest-CLI prompt).
