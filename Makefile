@@ -52,11 +52,30 @@ MOBILITYDB_INTERFACE_DB  ?= /tmp/mobilitydb-interface.sqlite
 
 .PHONY: smoke postgis mobilitydb \
     postgis-duckdb postgis-sqlite postgis-ducklink \
-    mobilitydb-duckdb mobilitydb-sqlite mobilitydb-ducklink
+    mobilitydb-duckdb mobilitydb-sqlite mobilitydb-ducklink \
+    postgis-per-sub \
+    postgis_core-sqlink postgis_core-ducklink \
+    postgis_sfcgal-sqlink postgis_sfcgal-ducklink \
+    postgis_raster-sqlink postgis_raster-ducklink \
+    postgis_format_encoders-sqlink postgis_format_encoders-ducklink
 
 smoke: postgis mobilitydb
 	@echo ""
 	@echo "===== ALL SMOKE TESTS PASSED ====="
+
+# Phase B compose:dynlink per-sub bridges. Each target loads a
+# per-sub bridge wasm against the vendored per-sub prebuilt provider
+# via SQLINK_SUB_EXT_* / DUCKLINK_SUB_EXT_* env vars. Bridge paths
+# come from ~/git/bridges/per-sub/<sub>-<host>-bridge/target/... and
+# prebuilt paths from datafission/extensions/postgis/deps/.
+# The default `smoke` target does NOT include these because they
+# depend on the per-sub bridge fleet being pre-built; run
+# `make postgis-per-sub` explicitly after regen.
+postgis-per-sub: \
+    postgis_core-sqlink postgis_core-ducklink \
+    postgis_sfcgal-sqlink postgis_sfcgal-ducklink \
+    postgis_raster-sqlink postgis_raster-ducklink \
+    postgis_format_encoders-sqlink postgis_format_encoders-ducklink
 
 # By default include the wasm-component targets (sqlite via sqlink,
 # duckdb via ducklink). The legacy native `-duckdb-` target is kept
@@ -132,3 +151,36 @@ mobilitydb-ducklink:
 	    SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
 	    bash scripts/run.sh ducklink $(MOBILITYDB_DUCKLINK_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb-duckdb-only; \
 	fi
+
+# ---------------------------------------------------------------
+# Phase B per-sub bridge smoke targets. Each pattern:
+#   1. Points scripts/run.sh at the per-sub bridge wasm as BRIDGE.
+#   2. Points at the per-sub vendored composed prebuilt as SHIM.
+#   3. Uses cases/postgis-<sub>/ if it exists, otherwise falls back
+#      to cases/postgis/ (the top-level corpus) so operators can
+#      progressively split cases without breaking the Makefile.
+# ---------------------------------------------------------------
+
+BRIDGES_DIR ?= $(HOME)/git/bridges/per-sub
+DEPS_DIR    ?= $(HOME)/git/datafission/extensions/postgis/deps
+
+define _per_sub_target
+$(1)-$(2):
+	@echo "=== $(1) × $(2) ==="
+	@dir=cases/$(1); if [ ! -d $$$$dir ]; then dir=cases/postgis; fi; \
+	 SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(POSTGIS_INTERFACE_DB) \
+	 bash scripts/run.sh $(3) \
+	   $(BRIDGES_DIR)/$(1)-$(2)-bridge/target/wasm32-wasip2/release/$(1)_$(4)_bridge_dynlink.wasm \
+	   $(DEPS_DIR)/$(shell echo $(1) | tr _ -)-composed.wasm \
+	   $$$$dir
+endef
+
+$(eval $(call _per_sub_target,postgis_core,sqlink,sqlite,sqlite))
+$(eval $(call _per_sub_target,postgis_core,ducklink,ducklink,duckdb))
+$(eval $(call _per_sub_target,postgis_sfcgal,sqlink,sqlite,sqlite))
+$(eval $(call _per_sub_target,postgis_sfcgal,ducklink,ducklink,duckdb))
+$(eval $(call _per_sub_target,postgis_raster,sqlink,sqlite,sqlite))
+$(eval $(call _per_sub_target,postgis_raster,ducklink,ducklink,duckdb))
+$(eval $(call _per_sub_target,postgis_format_encoders,sqlink,sqlite,sqlite))
+$(eval $(call _per_sub_target,postgis_format_encoders,ducklink,ducklink,duckdb))
