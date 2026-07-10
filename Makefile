@@ -226,3 +226,31 @@ postgis-shared-shim: \
     postgis_3d-sqlink postgis_3d-ducklink \
     postgis_topology-sqlink postgis_topology-ducklink \
     postgis_clustering-sqlink postgis_clustering-ducklink
+
+# ---------------------------------------------------------------
+# Phase 9.3: dynlink-mode monolithic postgis bridge (side-by-side
+# with the legacy `postgis-{sqlink,ducklink}` targets during the
+# parity soak). Two artifacts replace the two 122MB `wac plug` loadables:
+#   - postgis_{sqlite,duckdb}_bridge_dynlink.wasm (~300-800KB)
+#   - postgis-monolith-provider.wasm (128MB, vendored)
+# ---------------------------------------------------------------
+
+MONOLITH_BRIDGES_DIR ?= $(HOME)/git/bridges/monolith
+POSTGIS_MONOLITH_PROVIDER ?= $(DEPS_DIR)/postgis-monolith-provider.wasm
+
+define _monolith_target
+$(1)-monolith-dynlink:
+	@echo "=== $(1) postgis monolith × dynlink ==="
+	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(POSTGIS_INTERFACE_DB) \
+	 bash scripts/run.sh $(2) \
+	   $(MONOLITH_BRIDGES_DIR)/postgis-$(1)-bridge/target/wasm32-wasip2/release/postgis_$(3)_bridge_dynlink.wasm \
+	   $(POSTGIS_MONOLITH_PROVIDER) \
+	   cases/postgis
+endef
+
+$(eval $(call _monolith_target,sqlink,sqlite,sqlite))
+$(eval $(call _monolith_target,ducklink,ducklink,duckdb))
+
+.PHONY: postgis-monolith-dynlink sqlink-monolith-dynlink ducklink-monolith-dynlink
+postgis-monolith-dynlink: sqlink-monolith-dynlink ducklink-monolith-dynlink
