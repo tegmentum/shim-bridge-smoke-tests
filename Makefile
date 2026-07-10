@@ -184,3 +184,45 @@ $(eval $(call _per_sub_target,postgis_raster,sqlink,sqlite,sqlite))
 $(eval $(call _per_sub_target,postgis_raster,ducklink,ducklink,duckdb))
 $(eval $(call _per_sub_target,postgis_format_encoders,sqlink,sqlite,sqlite))
 $(eval $(call _per_sub_target,postgis_format_encoders,ducklink,ducklink,duckdb))
+
+# ---------------------------------------------------------------
+# Phase 9.1 shared-shim bridge targets. These sub-exts share the
+# postgis-core-composed.wasm provider; the run.sh env var wiring
+# adds SUB_EXT_ALIAS so `LOAD postgis_topology` resolves to the
+# same shared provider `postgis_core` registers.
+# ---------------------------------------------------------------
+
+# Alias map exported to both hosts so `LOAD postgis_topology` etc.
+# route through the postgis_core-composed provider. `run.sh` reads
+# this and forwards to {SQLINK,DUCKLINK}_SUB_EXT_ALIAS in the
+# spawned CLI environment.
+POSTGIS_SHARED_SHIM_ALIAS ?= postgis_metadata=postgis_core:postgis_3d=postgis_core:postgis_topology=postgis_core:postgis_clustering=postgis_core
+
+define _shared_sub_target
+$(1)-$(2):
+	@echo "=== $(1) × $(2) (shared-shim) ==="
+	@dir=cases/$(1); if [ ! -d $$$$dir ]; then dir=cases/postgis; fi; \
+	 SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(POSTGIS_INTERFACE_DB) \
+	 SUB_EXT_ALIAS="$(POSTGIS_SHARED_SHIM_ALIAS)" \
+	 bash scripts/run.sh $(3) \
+	   $(BRIDGES_DIR)/$(1)-$(2)-bridge/target/wasm32-wasip2/release/$(1)_$(4)_bridge_dynlink.wasm \
+	   $(DEPS_DIR)/postgis-core-composed.wasm \
+	   $$$$dir
+endef
+
+$(eval $(call _shared_sub_target,postgis_metadata,sqlink,sqlite,sqlite))
+$(eval $(call _shared_sub_target,postgis_metadata,ducklink,ducklink,duckdb))
+$(eval $(call _shared_sub_target,postgis_3d,sqlink,sqlite,sqlite))
+$(eval $(call _shared_sub_target,postgis_3d,ducklink,ducklink,duckdb))
+$(eval $(call _shared_sub_target,postgis_topology,sqlink,sqlite,sqlite))
+$(eval $(call _shared_sub_target,postgis_topology,ducklink,ducklink,duckdb))
+$(eval $(call _shared_sub_target,postgis_clustering,sqlink,sqlite,sqlite))
+$(eval $(call _shared_sub_target,postgis_clustering,ducklink,ducklink,duckdb))
+
+.PHONY: postgis-shared-shim
+postgis-shared-shim: \
+    postgis_metadata-sqlink postgis_metadata-ducklink \
+    postgis_3d-sqlink postgis_3d-ducklink \
+    postgis_topology-sqlink postgis_topology-ducklink \
+    postgis_clustering-sqlink postgis_clustering-ducklink
