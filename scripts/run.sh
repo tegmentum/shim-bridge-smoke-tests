@@ -334,8 +334,26 @@ for sql in "$case_dir"/*.sql; do
         # lines, and ensure a trailing `;` so the final statement
         # always fires. sqlite/duckdb CLIs tolerate this format.
         rewritten_norm="$(mktemp -t bridge-smoke.XXXXXX.norm.sql)"
+        # Track single-quote string state across lines so the trailing-`;`
+        # rewrite doesn't inject a stray `;` inside multi-line string
+        # literals (e.g. embedded JSON with real newlines). SQL escapes an
+        # embedded `'` as `''`; treat that as a stay-in-string sequence.
         sed -e 's/;[[:space:]]*/;\n/g' "$rewritten" \
-            | awk 'NF{ if (!/;[[:space:]]*$/) $0=$0";"; print }' \
+            | awk '
+BEGIN { in_str = 0; q = "\047" }
+!in_str && NF == 0 { next }
+{
+    n = length($0)
+    for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (c == q) {
+            if (in_str && i < n && substr($0, i+1, 1) == q) { i++; continue }
+            in_str = !in_str
+        }
+    }
+    if (!in_str && $0 !~ /;[[:space:]]*$/) $0 = $0 ";"
+    print
+}' \
             > "$rewritten_norm"
         mv "$rewritten_norm" "$rewritten"
         sql_input="$rewritten"
