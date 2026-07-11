@@ -62,6 +62,7 @@ MOBILITYDB_SHIM             ?= $(HOME)/git/mobilitydb-wasm/mobilitydb-composed.w
 SHIM_SQL_PREPROCESS      ?= $(HOME)/git/shim-sql-preprocess/target/release/shim-sql-preprocess
 POSTGIS_INTERFACE_DB     ?= $(HOME)/git/postgis-shim-interface/postgis-interface.sqlite
 MOBILITYDB_INTERFACE_DB  ?= $(HOME)/git/mobilitydb-shim-interface/mobilitydb-interface.sqlite
+TIMESCALEDB_INTERFACE_DB ?= $(HOME)/git/timescaledb-shim-interface/timescaledb-interface.sqlite
 
 .PHONY: smoke postgis mobilitydb \
     postgis-duckdb postgis-sqlite postgis-ducklink \
@@ -318,3 +319,69 @@ $(eval $(call _monolith_target,ducklink,ducklink,duckdb))
 
 .PHONY: postgis-monolith-dynlink sqlink-monolith-dynlink ducklink-monolith-dynlink
 postgis-monolith-dynlink: sqlink-monolith-dynlink ducklink-monolith-dynlink
+
+# ---------------------------------------------------------------
+# Phase 9.2 timescaledb per-sub bridge targets. 12 catalog sub-exts
+# × 2 hosts = 24 targets, aliasing to 3 provider stems (core /
+# toolkit / compression). Same structure as mobilitydb-per-sub;
+# per-sub SHIM SPLITTING (arm-extraction per catalog sub-ext) is a
+# follow-up — all 3 provider stems are byte-identical monoliths
+# today, wired for the future when the provider crate grows per-sub
+# modules.
+# ---------------------------------------------------------------
+
+TSDB_DEPS_DIR ?= $(HOME)/git/datafission/extensions/timescaledb/deps
+TSDB_ALIAS ?= timescale_meta=timescale_core:timescale_time_bucket=timescale_core:timescale_gapfill=timescale_core:timescale_hyperfunctions=timescale_core:timescale_hypertable=timescale_core:timescale_continuous_agg=timescale_core:timescale_policy=timescale_core:timescale_toolkit_sketches=timescale_toolkit:timescale_toolkit_stats=timescale_toolkit:timescale_toolkit_categorical=timescale_toolkit:timescale_toolkit_timevector=timescale_toolkit:timescale_compression=timescale_compression
+
+define _tsdb_sub_target
+$(1)-$(2):
+	@echo "=== $(1) × $(2) (timescaledb per-sub) ==="
+	@dir=cases/$(1); if [ ! -d $$$$dir ]; then dir=cases/timescaledb; fi; \
+	 SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(TIMESCALEDB_INTERFACE_DB) \
+	 SUB_EXT_ALIAS="$(TSDB_ALIAS)" \
+	 bash scripts/run.sh $(3) \
+	   $(BRIDGES_DIR)/$(1)-$(2)-bridge/target/wasm32-wasip2/release/$(1)_$(4)_bridge_dynlink.wasm \
+	   $(TSDB_DEPS_DIR)/timescaledb-$(5)-provider-composed.wasm \
+	   $$$$dir
+endef
+
+$(eval $(call _tsdb_sub_target,timescale_meta,sqlink,sqlite,sqlite,core))
+$(eval $(call _tsdb_sub_target,timescale_meta,ducklink,ducklink,duckdb,core))
+$(eval $(call _tsdb_sub_target,timescale_time_bucket,sqlink,sqlite,sqlite,core))
+$(eval $(call _tsdb_sub_target,timescale_time_bucket,ducklink,ducklink,duckdb,core))
+$(eval $(call _tsdb_sub_target,timescale_gapfill,sqlink,sqlite,sqlite,core))
+$(eval $(call _tsdb_sub_target,timescale_gapfill,ducklink,ducklink,duckdb,core))
+$(eval $(call _tsdb_sub_target,timescale_hyperfunctions,sqlink,sqlite,sqlite,core))
+$(eval $(call _tsdb_sub_target,timescale_hyperfunctions,ducklink,ducklink,duckdb,core))
+$(eval $(call _tsdb_sub_target,timescale_hypertable,sqlink,sqlite,sqlite,core))
+$(eval $(call _tsdb_sub_target,timescale_hypertable,ducklink,ducklink,duckdb,core))
+$(eval $(call _tsdb_sub_target,timescale_continuous_agg,sqlink,sqlite,sqlite,core))
+$(eval $(call _tsdb_sub_target,timescale_continuous_agg,ducklink,ducklink,duckdb,core))
+$(eval $(call _tsdb_sub_target,timescale_policy,sqlink,sqlite,sqlite,core))
+$(eval $(call _tsdb_sub_target,timescale_policy,ducklink,ducklink,duckdb,core))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_sketches,sqlink,sqlite,sqlite,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_sketches,ducklink,ducklink,duckdb,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_stats,sqlink,sqlite,sqlite,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_stats,ducklink,ducklink,duckdb,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_categorical,sqlink,sqlite,sqlite,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_categorical,ducklink,ducklink,duckdb,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_timevector,sqlink,sqlite,sqlite,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_toolkit_timevector,ducklink,ducklink,duckdb,toolkit))
+$(eval $(call _tsdb_sub_target,timescale_compression,sqlink,sqlite,sqlite,compression))
+$(eval $(call _tsdb_sub_target,timescale_compression,ducklink,ducklink,duckdb,compression))
+
+.PHONY: timescaledb-per-sub
+timescaledb-per-sub: \
+    timescale_meta-sqlink timescale_meta-ducklink \
+    timescale_time_bucket-sqlink timescale_time_bucket-ducklink \
+    timescale_gapfill-sqlink timescale_gapfill-ducklink \
+    timescale_hyperfunctions-sqlink timescale_hyperfunctions-ducklink \
+    timescale_hypertable-sqlink timescale_hypertable-ducklink \
+    timescale_continuous_agg-sqlink timescale_continuous_agg-ducklink \
+    timescale_policy-sqlink timescale_policy-ducklink \
+    timescale_toolkit_sketches-sqlink timescale_toolkit_sketches-ducklink \
+    timescale_toolkit_stats-sqlink timescale_toolkit_stats-ducklink \
+    timescale_toolkit_categorical-sqlink timescale_toolkit_categorical-ducklink \
+    timescale_toolkit_timevector-sqlink timescale_toolkit_timevector-ducklink \
+    timescale_compression-sqlink timescale_compression-ducklink
