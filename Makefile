@@ -16,39 +16,43 @@
 #   MOBILITYDB_SHIM           — mobilitydb composed shim wasm
 
 POSTGIS_DUCKDB_BRIDGE       ?= /tmp/postgis_duckdb_bridge.duckdb_extension
-# Legacy monolithic loadables — targets `duckdb:extension@2.2.0`, deprecated by
-# the current ducklink CLI which is at `@4.0.0`. Verified 2026-07-10 that a
-# fresh ducklink CLI cannot load these anymore (5/5 smoke cases FAIL with
-# instantiate-time linker error). The Phase 9.3 dynlink monolithic bridges
-# (`make postgis-monolith-dynlink`) are the working replacement — same
-# `LOAD postgis;` UX, 4/5 native + 1/5 needing shim-sql-preprocess wrap.
-# These defaults are RETAINED so operators with a matching-vintage ducklink
-# can still exercise the legacy path; new smoke runs should target
-# `postgis-monolith-dynlink` instead.
-POSTGIS_SQLITE_BRIDGE       ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm
-POSTGIS_DUCKLINK_BRIDGE     ?= $(HOME)/git/postgis-ducklink-bridge/postgis-ducklink-loadable.wasm
+# Postgis dynlink monolithic bridges (Phase 9.3). The postgis surface
+# now ships as two artifacts — a small (~400 KB) compose:dynlink bridge
+# wasm that exports the host contract, and a shared postgis-monolith-
+# provider.wasm (128 MB, vendored) that answers via
+# compose:dynlink/endpoint. `make postgis-sqlite` and `make
+# postgis-ducklink` route through these by default as of 2026-07-11.
+#
+# LEGACY (2026-07-10 and earlier, opt-in): the wac-plug monolithic
+# loadables at ~/git/postgis-{sqlink,ducklink}-bridge/postgis-{...}-loadable.wasm
+# target `duckdb:extension@2.2.0` and were verified BROKEN against the
+# current ducklink CLI (@4.0.0) — 5/5 smoke cases FAIL. Override
+# POSTGIS_{SQLITE,DUCKLINK}_BRIDGE to those paths on a matching-vintage
+# CLI if you need to exercise the retiring path.
+POSTGIS_SQLITE_BRIDGE       ?= $(HOME)/git/bridges/monolith/postgis-sqlink-bridge/target/wasm32-wasip2/release/postgis_sqlite_bridge_dynlink.wasm
+POSTGIS_DUCKLINK_BRIDGE     ?= $(HOME)/git/bridges/monolith/postgis-ducklink-bridge/target/wasm32-wasip2/release/postgis_duckdb_bridge_dynlink.wasm
 MOBILITYDB_DUCKDB_BRIDGE    ?= /tmp/mobilitydb_duckdb_bridge.duckdb_extension
 # mobilitydb's wasm bridges need postgis loaded first for the
 # GEOMETRY type (D5 load-order convention). The colon-separated
 # path is decoded by scripts/run.sh into two `LOAD` statements
 # in the listed order — same convention across sqlite (sqlink)
-# and ducklink targets.
-MOBILITYDB_SQLITE_BRIDGE    ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm:$(HOME)/git/mobilitydb-sqlink-bridge/mobilitydb-sqlink-loadable.wasm
-MOBILITYDB_DUCKLINK_BRIDGE  ?= $(HOME)/git/postgis-ducklink-bridge/postgis-ducklink-loadable.wasm:$(HOME)/git/mobilitydb-ducklink-bridge/mobilitydb-ducklink-loadable.wasm
-# Composed shim wasm — the datafission-vendored copies are the
-# canonical ones (post-kebab-fix at the wasm extern-name level,
-# matching the codegen's `kebab_fix_wit` rewrite of the bridge
-# WIT). See SHIM-BRIDGES.md's "Why the datafission-vendored shim"
-# section. The raw `~/git/postgis-wasm/postgis-composed.wasm`
-# and `~/git/mobilitydb-wasm/mobilitydb-composed.wasm` will fail
-# `wac plug` with a resource-identity mismatch.
+# and ducklink targets. mobilitydb-loadable paths retained pending
+# the Phase 9.2 socket-import transition (upstream mobilitydb-wasm
+# task); postgis half is dynlink-modern.
+MOBILITYDB_SQLITE_BRIDGE    ?= $(POSTGIS_SQLITE_BRIDGE):$(HOME)/git/mobilitydb-sqlink-bridge/mobilitydb-sqlink-loadable.wasm
+MOBILITYDB_DUCKLINK_BRIDGE  ?= $(POSTGIS_DUCKLINK_BRIDGE):$(HOME)/git/mobilitydb-ducklink-bridge/mobilitydb-ducklink-loadable.wasm
+# Composed provider wasm — datafission-vendored self-contained
+# postgis-monolith-provider.wasm (128 MB, exports
+# compose:dynlink/endpoint@0.1.0). Phase 9.3 dynlink monolithic
+# bridges register this as their composed provider at LOAD time
+# via the SUB_EXT_PREBUILT env var chain; per-sub bridges use
+# postgis-{core,sfcgal,raster,format-encoders}-provider-composed.wasm.
 #
-# Only actively used by the sqlite (sqlink) and legacy duckdb
-# targets (via `<EXT>_SHIM_WASM` env var). The ducklink target
-# doesn't need the shim at runtime — it's already `wac plug`'d
-# into the composed loadable — but the vars are set to canonical
-# paths for consistency.
-POSTGIS_SHIM                ?= $(HOME)/git/datafission/extensions/postgis/deps/postgis-composed.wasm
+# The pre-Phase-9.3 postgis-composed.wasm (raw compose output,
+# no compose:dynlink/endpoint) is retained in the deps dir for
+# legacy-loadable regen, but the dynlink smoke targets use the
+# monolith-provider variant.
+POSTGIS_SHIM                ?= $(HOME)/git/datafission/extensions/postgis/deps/postgis-monolith-provider.wasm
 MOBILITYDB_SHIM             ?= $(HOME)/git/mobilitydb-wasm/mobilitydb-composed.wasm
 
 # Optional preprocessor wiring. When SHIM_SQL_PREPROCESS is set,

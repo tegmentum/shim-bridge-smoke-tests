@@ -126,30 +126,64 @@ case "$target" in
         # Ensure cleanup even if the script exits mid-loop.
         trap 'rm -rf "$scratch_ext_dir"' EXIT
         loader=""
+        # Phase 9.3 dynlink env-var wiring: bridges with `_bridge_dynlink.wasm`
+        # in the filename are compose:dynlink guests that resolve their
+        # provider through the host's ProviderRegistry via the
+        # DUCKLINK_SUB_EXT_* env vars, not by being present at the scratch
+        # `extensions/$ext_name.wasm` path. Collect them here and export
+        # once at the end so subsequent bridges in the colon chain layer
+        # cleanly. Legacy `*-ducklink-loadable.wasm` bridges keep the
+        # copy-into-scratch behavior.
+        dynlink_bridges=""
+        dynlink_prebuilts=""
         IFS=':' read -r -a bridge_paths <<< "$bridge_path"
         for bp in "${bridge_paths[@]}"; do
             bp_abs="$(cd "$(dirname "$bp")" && pwd)/$(basename "$bp")"
             bp_base="$(basename "$bp")"
             case "$bp_base" in
+                *_bridge_dynlink.wasm)
+                    # Strip `_{sqlite,duckdb}_bridge_dynlink.wasm` — both variants
+                    # collapse onto the same ext_name (`postgis`, `postgis_core`).
+                    ext_name="${bp_base%_sqlite_bridge_dynlink.wasm}"
+                    ext_name="${ext_name%_duckdb_bridge_dynlink.wasm}"
+                    ext_name="${ext_name%_bridge_dynlink.wasm}"
+                    if [[ -n "$dynlink_bridges" ]]; then
+                        dynlink_bridges+=":"
+                        dynlink_prebuilts+=":"
+                    fi
+                    # Resolve shim to absolute path for the env var
+                    # (script resolves shim_abs later; do the same
+                    # transformation here inline for the dynlink map).
+                    _shim_abs="$(cd "$(dirname "$shim_path")" && pwd)/$(basename "$shim_path")"
+                    dynlink_bridges+="${ext_name}=${bp_abs}"
+                    dynlink_prebuilts+="${ext_name}=${_shim_abs}"
+                    ;;
                 *-ducklink-loadable.wasm)
                     ext_name="${bp_base%-ducklink-loadable.wasm}"
+                    cp "$bp_abs" "$scratch_ext_dir/$ext_name.wasm"
                     ;;
                 *.wasm)
                     ext_name="${bp_base%.wasm}"
+                    cp "$bp_abs" "$scratch_ext_dir/$ext_name.wasm"
                     ;;
                 *)
                     base="$(basename "$case_dir")"
                     ext_name="${base%%-*}"
+                    cp "$bp_abs" "$scratch_ext_dir/$ext_name.wasm"
                     ;;
             esac
-            cp "$bp_abs" "$scratch_ext_dir/$ext_name.wasm"
             loader+="LOAD $ext_name;"$'\n'
         done
         # `LOAD $ext_name` (bare identifier) triggers
-        # extension_artifact_path("$ext_name") -> "$dir/$ext_name.wasm".
+        # extension_artifact_path("$ext_name") -> "$dir/$ext_name.wasm" for
+        # legacy loadables, OR the sub-ext env-var branch for dynlink bridges.
         # Silence the default `jsonfns` autoload so it doesn't
         # bleed into the query output.
         export DUCKLINK_AUTOLOAD=""
+        if [[ -n "$dynlink_bridges" ]]; then
+            export DUCKLINK_SUB_EXT_BRIDGES="$dynlink_bridges"
+            export DUCKLINK_SUB_EXT_PREBUILT="$dynlink_prebuilts"
+        fi
         # ducklink invokes an internal duckdb-cli via wasm; the
         # `--` separates host args from guest-CLI args. `:memory:`
         # + stdin-piped SQL mirrors how sqlite/duckdb targets run.
