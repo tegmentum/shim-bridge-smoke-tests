@@ -60,8 +60,8 @@ MOBILITYDB_SHIM             ?= $(HOME)/git/mobilitydb-wasm/mobilitydb-composed.w
 # corresponding interface DB) before sending to the target CLI.
 # Skip per-case via a `<case>.no-preprocess` marker file.
 SHIM_SQL_PREPROCESS      ?= $(HOME)/git/shim-sql-preprocess/target/release/shim-sql-preprocess
-POSTGIS_INTERFACE_DB     ?= /tmp/postgis-interface.sqlite
-MOBILITYDB_INTERFACE_DB  ?= /tmp/mobilitydb-interface.sqlite
+POSTGIS_INTERFACE_DB     ?= $(HOME)/git/postgis-shim-interface/postgis-interface.sqlite
+MOBILITYDB_INTERFACE_DB  ?= $(HOME)/git/mobilitydb-shim-interface/mobilitydb-interface.sqlite
 
 .PHONY: smoke postgis mobilitydb \
     postgis-duckdb postgis-sqlite postgis-ducklink \
@@ -239,6 +239,57 @@ postgis-shared-shim: \
     postgis_3d-sqlink postgis_3d-ducklink \
     postgis_topology-sqlink postgis_topology-ducklink \
     postgis_clustering-sqlink postgis_clustering-ducklink
+
+# ---------------------------------------------------------------
+# Phase 9.2 mobilitydb per-sub bridge targets. Same shape as the
+# postgis Phase B + shared-shim macros: each sub-ext's bridge routes
+# through a mobilitydb per-sub composed provider vendored in
+# datafission/extensions/mobilitydb/deps/. The catalog sub-ext names
+# (mobilitydb_temporal_core etc.) alias to the plan-composed provider
+# stems (mobilitydb_core etc.) — the alias map is exported so the
+# SUB_EXT_ALIAS branch fires.
+# ---------------------------------------------------------------
+
+MDB_DEPS_DIR ?= $(HOME)/git/datafission/extensions/mobilitydb/deps
+MDB_ALIAS ?= mobilitydb_temporal_core=mobilitydb_core:mobilitydb_temporal_scalar=mobilitydb_bigint:mobilitydb_temporal_jsonb=mobilitydb_jsonb:mobilitydb_spatiotemporal_core=mobilitydb_spatial:mobilitydb_spatiotemporal=mobilitydb_geometry:mobilitydb_network=mobilitydb_network:mobilitydb_analytics=mobilitydb_analytics
+
+define _mdb_sub_target
+$(1)-$(2):
+	@echo "=== $(1) × $(2) (mobilitydb per-sub) ==="
+	@dir=cases/$(1); if [ ! -d $$$$dir ]; then dir=cases/mobilitydb; fi; \
+	 SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
+	 SUB_EXT_ALIAS="$(MDB_ALIAS)" \
+	 bash scripts/run.sh $(3) \
+	   $(BRIDGES_DIR)/$(1)-$(2)-bridge/target/wasm32-wasip2/release/$(1)_$(4)_bridge_dynlink.wasm \
+	   $(MDB_DEPS_DIR)/mobilitydb-$(5)-provider-composed.wasm \
+	   $$$$dir
+endef
+
+$(eval $(call _mdb_sub_target,mobilitydb_temporal_core,sqlink,sqlite,sqlite,core))
+$(eval $(call _mdb_sub_target,mobilitydb_temporal_core,ducklink,ducklink,duckdb,core))
+$(eval $(call _mdb_sub_target,mobilitydb_temporal_scalar,sqlink,sqlite,sqlite,bigint))
+$(eval $(call _mdb_sub_target,mobilitydb_temporal_scalar,ducklink,ducklink,duckdb,bigint))
+$(eval $(call _mdb_sub_target,mobilitydb_temporal_jsonb,sqlink,sqlite,sqlite,jsonb))
+$(eval $(call _mdb_sub_target,mobilitydb_temporal_jsonb,ducklink,ducklink,duckdb,jsonb))
+$(eval $(call _mdb_sub_target,mobilitydb_spatiotemporal_core,sqlink,sqlite,sqlite,spatial))
+$(eval $(call _mdb_sub_target,mobilitydb_spatiotemporal_core,ducklink,ducklink,duckdb,spatial))
+$(eval $(call _mdb_sub_target,mobilitydb_spatiotemporal,sqlink,sqlite,sqlite,geometry))
+$(eval $(call _mdb_sub_target,mobilitydb_spatiotemporal,ducklink,ducklink,duckdb,geometry))
+$(eval $(call _mdb_sub_target,mobilitydb_network,sqlink,sqlite,sqlite,network))
+$(eval $(call _mdb_sub_target,mobilitydb_network,ducklink,ducklink,duckdb,network))
+$(eval $(call _mdb_sub_target,mobilitydb_analytics,sqlink,sqlite,sqlite,analytics))
+$(eval $(call _mdb_sub_target,mobilitydb_analytics,ducklink,ducklink,duckdb,analytics))
+
+.PHONY: mobilitydb-per-sub
+mobilitydb-per-sub: \
+    mobilitydb_temporal_core-sqlink mobilitydb_temporal_core-ducklink \
+    mobilitydb_temporal_scalar-sqlink mobilitydb_temporal_scalar-ducklink \
+    mobilitydb_temporal_jsonb-sqlink mobilitydb_temporal_jsonb-ducklink \
+    mobilitydb_spatiotemporal_core-sqlink mobilitydb_spatiotemporal_core-ducklink \
+    mobilitydb_spatiotemporal-sqlink mobilitydb_spatiotemporal-ducklink \
+    mobilitydb_network-sqlink mobilitydb_network-ducklink \
+    mobilitydb_analytics-sqlink mobilitydb_analytics-ducklink
 
 # ---------------------------------------------------------------
 # Phase 9.3: dynlink-mode monolithic postgis bridge (side-by-side

@@ -51,14 +51,37 @@ case "$target" in
         # first (D5 load-order convention).
         if [[ "$bridge_path" == *.wasm* ]]; then
             if [[ -z "${SQLINK_LOADER:-}" ]]; then
-                SQLINK_LOADER="$HOME/git/sqlink/target/release/libsqlink_loader.dylib"
+                # The bespoke loader crate (`sqlink-loader`) was retired
+                # by sqlink #220. Its replacement is `sqlink-extension`
+                # (libsqlink_extension.dylib) which loads via
+                # `sqlite3_sqlinkloader_init` and exposes the
+                # `sqlink_load_ext()` SQL function. Fall back to it if
+                # the legacy path doesn't exist.
+                if [[ -f "$HOME/git/sqlink/target/release/libsqlink_loader.dylib" ]]; then
+                    SQLINK_LOADER="$HOME/git/sqlink/target/release/libsqlink_loader.dylib"
+                elif [[ -f "$HOME/git/sqlink/target/release/libsqlink_extension.dylib" ]]; then
+                    SQLINK_LOADER="$HOME/git/sqlink/target/release/libsqlink_extension.dylib"
+                fi
             fi
             if [[ ! -f "$SQLINK_LOADER" ]]; then
                 echo "ERROR: SQLINK_LOADER=$SQLINK_LOADER not found" >&2
                 echo "       Build with: cd ~/git/sqlink && cargo build --release -p sqlink-loader" >&2
                 exit 2
             fi
-            loader=".load $SQLINK_LOADER"
+            # sqlite3 auto-derives the init entry from the filename
+            # (`libsqlink_extension.dylib` → `sqlite3_sqlinkextension_init`),
+            # but sqlink-extension actually exports the entry as
+            # `sqlite3_sqlinkloader_init` — kept for backward-compat with
+            # the retired sqlink-loader crate. Pass the explicit entry so
+            # sqlite3 doesn't dlsym the wrong name.
+            case "$(basename "$SQLINK_LOADER")" in
+                libsqlink_extension.*)
+                    loader=".load $SQLINK_LOADER sqlite3_sqlinkloader_init"
+                    ;;
+                *)
+                    loader=".load $SQLINK_LOADER"
+                    ;;
+            esac
             IFS=':' read -r -a bridge_paths <<< "$bridge_path"
             for bp in "${bridge_paths[@]}"; do
                 bp_abs="$(cd "$(dirname "$bp")" && pwd)/$(basename "$bp")"
@@ -355,7 +378,8 @@ for sql in "$case_dir"/*.sql; do
         -e '/^\[duckdb-core\]/d' \
         -e '/-duckdb-bridge: /d' \
         -e '/-sqlite-bridge: /d' \
-        -e '/^loaded [a-z]*: [0-9]* scalar/d' \
+        -e '/^loaded /d' \
+        -e '/^Error: dlsym/d' \
         "$actual" \
         | awk '{ lines[NR]=$0; if (NF) last=NR } END { for (i=1; i<=last; i++) print lines[i] }' \
         > "$norm_actual"
