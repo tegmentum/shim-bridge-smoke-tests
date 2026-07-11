@@ -10,6 +10,13 @@ running query suites through `sqlite3`, `duckdb`, and
 `ducklink` (wasm-component DuckDB host) against generated
 bridges.
 
+**Fleet index**: [SHIM-BRIDGES.md](SHIM-BRIDGES.md) —
+canonical map of every generated bridge (extension × host),
+per-sub compose:dynlink model documentation, and the
+regeneration recipes for both the legacy `wac plug`
+monolithic path and the current Phase B/9.1/9.3 dynlink
+per-sub / shared-shim / monolithic paths.
+
 ## What it tests
 
 For each (target, bridge artifact, composed shim wasm) tuple,
