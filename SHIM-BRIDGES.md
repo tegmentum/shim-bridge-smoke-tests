@@ -114,28 +114,48 @@ Both require sibling checkouts of `shim-interface-core` and
 **Do not hand-edit** — regenerate from the interface DB via the
 Layer 2 codegen. All bridges are `wasm32-wasip2` components.
 
-### Monolithic bridges (legacy, `wac plug` compose)
+### Umbrella bridges (`compose:dynlink` runtime, Phase 9.4)
 
-|  | sqlink (SQLite host) | ducklink (DuckDB host) |
-| --- | --- | --- |
-| **postgis** ‡ | `postgis-sqlink-bridge` | `postgis-ducklink-bridge` |
-| **mobilitydb** | `mobilitydb-sqlink-bridge` | `mobilitydb-ducklink-bridge` |
-| **address-standardizer** | `address-standardizer-sqlink-bridge` | — |
-| **tiger-geocoder** | `tiger-geocoder-sqlink-bridge` † | — |
+The umbrella bridges resolve the corresponding `<ext>-composed`
+provider at LOAD time via `compose:dynlink/linker.resolve-by-id`;
+the host's `{SQLINK,DUCKLINK}_SUB_EXT_PREBUILT=<ext>=<path>` chain
+points at a vendored `<ext>-monolith-provider.wasm`. Emitted by
+`sqlink-shim-codegen --dynlink --target <ext>` off
+`<ext>-catalog.toml`'s `<ext>` umbrella id (every leaf the umbrella
+expands to contributes scalars + aggregates).
 
-‡ **Phase 9.3 migration in flight.** New-model monolithic dynlink
-bridges emit at `~/git/bridges/monolith/postgis-{sqlink,ducklink}-bridge/`
-via `sqlink-shim-codegen --dynlink --target postgis`. The two ~400KB
-bridge wasms + one shared 128MB `postgis-monolith-provider.wasm` replace
-the two 122MB `wac plug`-composed loadables. Provider id
-`postgis-composed`; env-var wiring identical to per-sub bridges
-(`SQLINK_SUB_EXT_PREBUILT="postgis=…"`). Legacy loadables still emit;
-`make postgis-monolith-dynlink` runs the new artifacts side-by-side
-for parity verification. **Known gap**: dynlink bridge advertises 1065
-scalars vs the interface DB's 1227 — the scalar-first dynlink emitter
-doesn't yet lift the ~146 aggregates/UDTFs the legacy monolith
-handles. Retiring the legacy path is blocked on the emitter closing
-that gap.
+|  | sqlink (SQLite host) | ducklink (DuckDB host) | provider id |
+| --- | --- | --- | --- |
+| **postgis** | `postgis-sqlink-bridge` | `postgis-ducklink-bridge` | `postgis-composed` |
+| **mobilitydb** | `mobilitydb-sqlink-bridge` | `mobilitydb-ducklink-bridge` | `mobilitydb-composed` |
+| **timescaledb** | `timescaledb-sqlink-bridge` | `timescaledb-ducklink-bridge` | `timescaledb-composed` |
+| **address-standardizer** ‡ | `address-standardizer-sqlink-bridge` | — | — |
+| **tiger-geocoder** ‡ † | `tiger-geocoder-sqlink-bridge` | — | — |
+
+‡ Still on the legacy wac-plug path; Phase 9.4 migration deferred.
+
+† PostGIS-family scalar surface, US-locale only.
+
+**Phase 9.4 wire-up.** The umbrella bridges retired the
+build-time `wac plug` step. Each loadable wasm is ~0.2–1.4 MB
+(bridge only); the ~120 MB shim ships once per family as a
+vendored `<ext>-monolith-provider.wasm` under
+`datafission/extensions/<ext>/deps/`. Compared to the retired
+wac-plug loadables the bridge shrinks by ~100–300× — worked
+example:
+
+* `postgis-ducklink-loadable.wasm` (wac-plug): **128 MB**
+* `postgis_duckdb_bridge_dynlink.wasm` (compose:dynlink): **816 KB**
+
+**Known emit gap.** The dynlink emitter's scalar-first cut
+means UDTFs / table-functions / spatial-index registration
+paths stub out today (`postgis-sqlite-only/05-udtfs`,
+`postgis-duckdb-only/01-table-functions,02-index-limitation,
+03-spatial-index` fail against the umbrella bridges — same 4
+cases failed before the migration). The umbrella smoke targets
+(`make postgis-sqlite postgis-ducklink mobilitydb-sqlite
+mobilitydb-ducklink timescaledb-sqlite timescaledb-ducklink`)
+cover the scalar/load path.
 
 ### Per-sub-extension bridges (compose:dynlink runtime, Phase B)
 
