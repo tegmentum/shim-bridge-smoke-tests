@@ -16,6 +16,15 @@
 #   MOBILITYDB_SHIM           — mobilitydb composed shim wasm
 
 POSTGIS_DUCKDB_BRIDGE       ?= /tmp/postgis_duckdb_bridge.duckdb_extension
+# Legacy monolithic loadables — targets `duckdb:extension@2.2.0`, deprecated by
+# the current ducklink CLI which is at `@4.0.0`. Verified 2026-07-10 that a
+# fresh ducklink CLI cannot load these anymore (5/5 smoke cases FAIL with
+# instantiate-time linker error). The Phase 9.3 dynlink monolithic bridges
+# (`make postgis-monolith-dynlink`) are the working replacement — same
+# `LOAD postgis;` UX, 4/5 native + 1/5 needing shim-sql-preprocess wrap.
+# These defaults are RETAINED so operators with a matching-vintage ducklink
+# can still exercise the legacy path; new smoke runs should target
+# `postgis-monolith-dynlink` instead.
 POSTGIS_SQLITE_BRIDGE       ?= $(HOME)/git/postgis-sqlink-bridge/postgis-sqlink-loadable.wasm
 POSTGIS_DUCKLINK_BRIDGE     ?= $(HOME)/git/postgis-ducklink-bridge/postgis-ducklink-loadable.wasm
 MOBILITYDB_DUCKDB_BRIDGE    ?= /tmp/mobilitydb_duckdb_bridge.duckdb_extension
