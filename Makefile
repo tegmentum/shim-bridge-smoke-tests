@@ -241,6 +241,13 @@ postgis-shared-shim: \
     postgis_topology-sqlink postgis_topology-ducklink \
     postgis_clustering-sqlink postgis_clustering-ducklink
 
+# Phase 9.3 umbrella: all 8 postgis sub-exts × 2 hosts = 16 targets.
+# Combines the 4 dedicated per-sub bridges (postgis-per-sub) with the
+# 4 shared-shim aliased bridges (postgis-shared-shim). Each hits its
+# own `cases/postgis_<sub>/01-load.sql` load smoke.
+.PHONY: postgis-8sub
+postgis-8sub: postgis-per-sub postgis-shared-shim
+
 # ---------------------------------------------------------------
 # Phase 9.2 mobilitydb per-sub bridge targets. Same shape as the
 # postgis Phase B + shared-shim macros: each sub-ext's bridge routes

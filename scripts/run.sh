@@ -83,30 +83,73 @@ case "$target" in
                     ;;
             esac
             IFS=':' read -r -a bridge_paths <<< "$bridge_path"
+            # Phase 9.3 dynlink env-var wiring (mirrors the ducklink
+            # branch below): bridges whose filename ends in
+            # `_bridge_dynlink.wasm` are compose:dynlink guests that
+            # resolve their provider through sqlink-host's
+            # ProviderRegistry via the SQLINK_SUB_EXT_* env vars,
+            # not by having the shim baked into the bridge. Collect
+            # them here and export once at the end. Bare
+            # `sqlink_load_ext(<ext_name>)` (no path) triggers the
+            # sub-ext branch in sqlink-extension's load.rs.
+            dynlink_bridges=""
+            dynlink_prebuilts=""
             for bp in "${bridge_paths[@]}"; do
                 bp_abs="$(cd "$(dirname "$bp")" && pwd)/$(basename "$bp")"
                 # Derive the extension name from the wasm filename,
                 # stripping the canonical `-sqlink-loadable.wasm`
-                # suffix. Falls back to the basename minus the
-                # `.wasm` extension. For chained loads (postgis +
-                # mobilitydb) each load uses its own name so the
-                # bridge registers under the right identity.
+                # suffix (legacy wac-plug loadables) or the
+                # `_bridge_dynlink.wasm` suffix (Phase 9.3 dynlink).
+                # Falls back to the basename minus the `.wasm`
+                # extension. For chained loads (postgis + mobilitydb)
+                # each load uses its own name so the bridge
+                # registers under the right identity.
                 bp_base="$(basename "$bp")"
                 case "$bp_base" in
+                    *_bridge_dynlink.wasm)
+                        # Strip `_{sqlite,duckdb}_bridge_dynlink.wasm`
+                        # — both variants collapse onto the same
+                        # ext_name (`postgis`, `postgis_core`).
+                        ext_name="${bp_base%_sqlite_bridge_dynlink.wasm}"
+                        ext_name="${ext_name%_duckdb_bridge_dynlink.wasm}"
+                        ext_name="${ext_name%_bridge_dynlink.wasm}"
+                        if [[ -n "$dynlink_bridges" ]]; then
+                            dynlink_bridges+=":"
+                            dynlink_prebuilts+=":"
+                        fi
+                        _shim_abs="$(cd "$(dirname "$shim_path")" && pwd)/$(basename "$shim_path")"
+                        dynlink_bridges+="${ext_name}=${bp_abs}"
+                        dynlink_prebuilts+="${ext_name}=${_shim_abs}"
+                        # sqlink_load_ext(name) with no path triggers
+                        # the sub-ext branch: sqlink-extension's
+                        # load.rs treats a bare name as a
+                        # SubExtLoader lookup. Its
+                        # host.load_extension takes the bridge path
+                        # from SQLINK_SUB_EXT_BRIDGES and registers
+                        # SQLINK_SUB_EXT_PREBUILT under
+                        # `<ext_name>-composed`.
+                        loader+=$'\n'"SELECT sqlink_load_ext('$ext_name');"
+                        ;;
                     *-sqlink-loadable.wasm)
                         ext_name="${bp_base%-sqlink-loadable.wasm}"
+                        loader+=$'\n'"SELECT sqlink_load_ext('$ext_name', '$bp_abs');"
                         ;;
                     *.wasm)
                         ext_name="${bp_base%.wasm}"
+                        loader+=$'\n'"SELECT sqlink_load_ext('$ext_name', '$bp_abs');"
                         ;;
                     *)
                         # Last-resort: case-dir basename, first `-`-segment.
                         base="$(basename "$case_dir")"
                         ext_name="${base%%-*}"
+                        loader+=$'\n'"SELECT sqlink_load_ext('$ext_name', '$bp_abs');"
                         ;;
                 esac
-                loader+=$'\n'"SELECT sqlink_load_ext('$ext_name', '$bp_abs');"
             done
+            if [[ -n "$dynlink_bridges" ]]; then
+                export SQLINK_SUB_EXT_BRIDGES="$dynlink_bridges"
+                export SQLINK_SUB_EXT_PREBUILT="$dynlink_prebuilts"
+            fi
             # Last bridge is the "primary" for diagnostic context.
             bridge_abs="$(cd "$(dirname "${bridge_paths[-1]}")" && pwd)/$(basename "${bridge_paths[-1]}")"
         else
