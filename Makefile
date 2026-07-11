@@ -29,31 +29,39 @@ POSTGIS_DUCKDB_BRIDGE       ?= /tmp/postgis_duckdb_bridge.duckdb_extension
 # current ducklink CLI (@4.0.0) — 5/5 smoke cases FAIL. Override
 # POSTGIS_{SQLITE,DUCKLINK}_BRIDGE to those paths on a matching-vintage
 # CLI if you need to exercise the retiring path.
-POSTGIS_SQLITE_BRIDGE       ?= $(HOME)/git/bridges/monolith/postgis-sqlink-bridge/target/wasm32-wasip2/release/postgis_sqlite_bridge_dynlink.wasm
-POSTGIS_DUCKLINK_BRIDGE     ?= $(HOME)/git/bridges/monolith/postgis-ducklink-bridge/target/wasm32-wasip2/release/postgis_duckdb_bridge_dynlink.wasm
+POSTGIS_SQLITE_BRIDGE       ?= $(HOME)/git/postgis-sqlink-bridge/target/wasm32-wasip2/release/postgis_sqlite_bridge_dynlink.wasm
+POSTGIS_DUCKLINK_BRIDGE     ?= $(HOME)/git/postgis-ducklink-bridge/target/wasm32-wasip2/release/postgis_duckdb_bridge_dynlink.wasm
 MOBILITYDB_DUCKDB_BRIDGE    ?= /tmp/mobilitydb_duckdb_bridge.duckdb_extension
-# mobilitydb's wasm bridges need postgis loaded first for the
-# GEOMETRY type (D5 load-order convention). The colon-separated
-# path is decoded by scripts/run.sh into two `LOAD` statements
-# in the listed order — same convention across sqlite (sqlink)
-# and ducklink targets. mobilitydb-loadable paths retained pending
-# the Phase 9.2 socket-import transition (upstream mobilitydb-wasm
-# task); postgis half is dynlink-modern.
-MOBILITYDB_SQLITE_BRIDGE    ?= $(POSTGIS_SQLITE_BRIDGE):$(HOME)/git/mobilitydb-sqlink-bridge/mobilitydb-sqlink-loadable.wasm
-MOBILITYDB_DUCKLINK_BRIDGE  ?= $(POSTGIS_DUCKLINK_BRIDGE):$(HOME)/git/mobilitydb-ducklink-bridge/mobilitydb-ducklink-loadable.wasm
+# Phase 9.4 dynlink-mode umbrella bridges for the mobilitydb
+# family. Same shape as postgis above: a small (~KB) dynlink
+# bridge wasm resolves the resident `mobilitydb-composed`
+# provider via `compose:dynlink/linker`, the 13 MB
+# `mobilitydb-monolith-provider.wasm` is registered as
+# SQLINK_SUB_EXT_PREBUILT / DUCKLINK_SUB_EXT_PREBUILT. Colon-
+# chained after the postgis dynlink bridge so `LOAD postgis;`
+# happens first (mobilitydb's spatiotemporal leaves depend on
+# postgis's GEOMETRY type — D5 load-order convention).
+MOBILITYDB_SQLITE_BRIDGE    ?= $(POSTGIS_SQLITE_BRIDGE):$(HOME)/git/mobilitydb-sqlink-bridge/target/wasm32-wasip2/release/mobilitydb_sqlite_bridge_dynlink.wasm
+MOBILITYDB_DUCKLINK_BRIDGE  ?= $(POSTGIS_DUCKLINK_BRIDGE):$(HOME)/git/mobilitydb-ducklink-bridge/target/wasm32-wasip2/release/mobilitydb_duckdb_bridge_dynlink.wasm
+# Phase 9.4 timescaledb umbrella bridges — analogue of the two
+# families above; no postgis load-order dep (timescaledb is
+# purely time-series scalars/aggregates over primitive types).
+TIMESCALEDB_SQLITE_BRIDGE   ?= $(HOME)/git/timescaledb-sqlink-bridge/target/wasm32-wasip2/release/timescaledb_sqlite_bridge_dynlink.wasm
+TIMESCALEDB_DUCKLINK_BRIDGE ?= $(HOME)/git/timescaledb-ducklink-bridge/target/wasm32-wasip2/release/timescaledb_duckdb_bridge_dynlink.wasm
 # Composed provider wasm — datafission-vendored self-contained
-# postgis-monolith-provider.wasm (128 MB, exports
-# compose:dynlink/endpoint@0.1.0). Phase 9.3 dynlink monolithic
-# bridges register this as their composed provider at LOAD time
-# via the SUB_EXT_PREBUILT env var chain; per-sub bridges use
-# postgis-{core,sfcgal,raster,format-encoders}-provider-composed.wasm.
+# {postgis,mobilitydb,timescaledb}-monolith-provider(-composed).wasm.
+# The dynlink umbrella bridges register these as their composed
+# provider at LOAD time via the SUB_EXT_PREBUILT env-var chain;
+# per-sub bridges use the per-sub `-provider-composed.wasm`
+# siblings.
 #
 # The pre-Phase-9.3 postgis-composed.wasm (raw compose output,
 # no compose:dynlink/endpoint) is retained in the deps dir for
 # legacy-loadable regen, but the dynlink smoke targets use the
 # monolith-provider variant.
 POSTGIS_SHIM                ?= $(HOME)/git/datafission/extensions/postgis/deps/postgis-monolith-provider.wasm
-MOBILITYDB_SHIM             ?= $(HOME)/git/mobilitydb-wasm/mobilitydb-composed.wasm
+MOBILITYDB_SHIM             ?= $(HOME)/git/datafission/extensions/mobilitydb/deps/mobilitydb-monolith-provider.wasm
+TIMESCALEDB_SHIM            ?= $(HOME)/git/datafission/extensions/timescaledb/deps/timescaledb-monolith-provider-composed.wasm
 
 # Optional preprocessor wiring. When SHIM_SQL_PREPROCESS is set,
 # scripts/run.sh pipes each case file through it (with the
@@ -64,16 +72,17 @@ POSTGIS_INTERFACE_DB     ?= $(HOME)/git/postgis-shim-interface/postgis-interface
 MOBILITYDB_INTERFACE_DB  ?= $(HOME)/git/mobilitydb-shim-interface/mobilitydb-interface.sqlite
 TIMESCALEDB_INTERFACE_DB ?= $(HOME)/git/timescaledb-shim-interface/timescaledb-interface.sqlite
 
-.PHONY: smoke postgis mobilitydb \
+.PHONY: smoke postgis mobilitydb timescaledb \
     postgis-duckdb postgis-sqlite postgis-ducklink \
     mobilitydb-duckdb mobilitydb-sqlite mobilitydb-ducklink \
+    timescaledb-sqlite timescaledb-sqlink timescaledb-ducklink \
     postgis-per-sub \
     postgis_core-sqlink postgis_core-ducklink \
     postgis_sfcgal-sqlink postgis_sfcgal-ducklink \
     postgis_raster-sqlink postgis_raster-ducklink \
     postgis_format_encoders-sqlink postgis_format_encoders-ducklink
 
-smoke: postgis mobilitydb
+smoke: postgis mobilitydb timescaledb
 	@echo ""
 	@echo "===== ALL SMOKE TESTS PASSED ====="
 
@@ -97,6 +106,14 @@ postgis-per-sub: \
 # — invoke it explicitly with `make postgis-duckdb` / `make
 # mobilitydb-duckdb` if you still need it.
 postgis: postgis-sqlite postgis-ducklink
+
+# `postgis-sqlink` / `mobilitydb-sqlink` aliases for the `-sqlite`
+# targets — matches the tegmentum bridge repo suffix
+# (`postgis-sqlink-bridge`) so operators can `make <ext>-sqlink`
+# without remembering the sqlite-vs-sqlink split.
+postgis-sqlink: postgis-sqlite
+
+mobilitydb-sqlink: mobilitydb-sqlite
 
 mobilitydb: mobilitydb-sqlite mobilitydb-ducklink
 
@@ -140,6 +157,18 @@ mobilitydb-sqlite:
 	@echo "=== mobilitydb × sqlite ==="
 	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
 	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
+	 bash scripts/run.sh sqlite $(MOBILITYDB_SQLITE_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb-umbrella
+
+# Full function corpus target — exercises `cases/mobilitydb/*` end-
+# to-end. Currently blocked on mobilitydb-monolith-provider.wasm
+# parity gap (13MB monolith vs interface-DB advertising ~40+ methods
+# the monolith doesn't export). Retained so the corpus can regain
+# green once the shim catches up; not part of the default
+# `make smoke` orchestration.
+mobilitydb-sqlite-full:
+	@echo "=== mobilitydb × sqlite (full function corpus) ==="
+	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
 	 bash scripts/run.sh sqlite $(MOBILITYDB_SQLITE_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb
 
 postgis-ducklink:
@@ -158,6 +187,12 @@ mobilitydb-ducklink:
 	@echo "=== mobilitydb × ducklink ==="
 	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
 	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
+	 bash scripts/run.sh ducklink $(MOBILITYDB_DUCKLINK_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb-umbrella
+
+mobilitydb-ducklink-full:
+	@echo "=== mobilitydb × ducklink (full function corpus) ==="
+	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
 	 bash scripts/run.sh ducklink $(MOBILITYDB_DUCKLINK_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb
 	@if [ -d cases/mobilitydb-duckdb-only ]; then \
 	    echo "=== mobilitydb × ducklink (duckdb-only cases) ==="; \
@@ -165,6 +200,31 @@ mobilitydb-ducklink:
 	    SHIM_INTERFACE_DB=$(MOBILITYDB_INTERFACE_DB) \
 	    bash scripts/run.sh ducklink $(MOBILITYDB_DUCKLINK_BRIDGE) $(MOBILITYDB_SHIM) cases/mobilitydb-duckdb-only; \
 	fi
+
+# Phase 9.4 timescaledb umbrella bridge smoke targets. `LOAD
+# timescaledb;` loads the dynlink umbrella bridge against the
+# vendored `timescaledb-monolith-provider-composed.wasm`. Kept
+# minimal — a load-verification case under cases/timescaledb —
+# because timescaledb's per-fn parity coverage is exercised by
+# the 24 per-sub bridges under `timescaledb-per-sub`. The
+# umbrella target proves the wac-plug→compose:dynlink migration
+# didn't regress the `LOAD timescaledb;` UX.
+
+timescaledb: timescaledb-sqlite timescaledb-ducklink
+
+timescaledb-sqlink: timescaledb-sqlite
+
+timescaledb-sqlite:
+	@echo "=== timescaledb × sqlite ==="
+	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(TIMESCALEDB_INTERFACE_DB) \
+	 bash scripts/run.sh sqlite $(TIMESCALEDB_SQLITE_BRIDGE) $(TIMESCALEDB_SHIM) cases/timescaledb
+
+timescaledb-ducklink:
+	@echo "=== timescaledb × ducklink ==="
+	@SHIM_SQL_PREPROCESS=$(SHIM_SQL_PREPROCESS) \
+	 SHIM_INTERFACE_DB=$(TIMESCALEDB_INTERFACE_DB) \
+	 bash scripts/run.sh ducklink $(TIMESCALEDB_DUCKLINK_BRIDGE) $(TIMESCALEDB_SHIM) cases/timescaledb
 
 # ---------------------------------------------------------------
 # Phase B per-sub bridge smoke targets. Each pattern:

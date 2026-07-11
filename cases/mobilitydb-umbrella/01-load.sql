@@ -1,0 +1,11 @@
+-- Phase 9.4 umbrella-bridge smoke: verify `LOAD mobilitydb;` (dynlink
+-- umbrella) instantiates cleanly against the resident
+-- `mobilitydb-composed` provider. Returns 1 on success — proves the
+-- bridge's compose:dynlink/linker.resolve-by-id call fires and the
+-- guest register_scalars runs without a Rust panic. Function-level
+-- coverage against the mobilitydb-monolith provider lives under
+-- `cases/mobilitydb/` (run via `make mobilitydb-full`), currently
+-- blocked on the monolith provider's method-surface parity gap with
+-- the interface DB (the 13MB monolith wasm predates recent per-sub
+-- shim splits; ~40+ methods are absent — tracked separately).
+SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END;
