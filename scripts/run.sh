@@ -258,6 +258,20 @@ for sql in "$case_dir"/*.sql; do
             failed_names+=("$name")
             continue
         fi
+        # Normalize preprocessor output: sqlparser reunparses the
+        # AST as a single line of `stmt; stmt; stmt` with no
+        # trailing `;` and no newlines. The ducklink guest CLI
+        # dispatches one line at a time (a line with embedded `;`
+        # becomes ONE statement handed to duckdb::execute, and a
+        # line without a trailing `;` never dispatches at all).
+        # Split on `;` boundaries onto separate lines, drop empty
+        # lines, and ensure a trailing `;` so the final statement
+        # always fires. sqlite/duckdb CLIs tolerate this format.
+        rewritten_norm="$(mktemp -t bridge-smoke.XXXXXX.norm.sql)"
+        sed -e 's/;[[:space:]]*/;\n/g' "$rewritten" \
+            | awk 'NF{ if (!/;[[:space:]]*$/) $0=$0";"; print }' \
+            > "$rewritten_norm"
+        mv "$rewritten_norm" "$rewritten"
         sql_input="$rewritten"
         rm -f "$rewritten.err"
     else
@@ -265,18 +279,27 @@ for sql in "$case_dir"/*.sql; do
     fi
 
     {
-        printf '%s\n' "$loader"
         # SQLite needs `.mode list` + `.headers off` to produce
-        # canonical pipe-delimited output; DuckDB (both native
-        # and ducklink hosts) needs explicit ".mode csv".
+        # canonical pipe-delimited output; DuckDB (native) needs
+        # ".mode csv" + ".headers off". The ducklink guest CLI
+        # (WASI duckdb-cli) supports ".mode {table|csv|json}"
+        # only — no ".headers", so we emit ".mode csv" alone and
+        # strip the header/prompt noise from the output below.
+        # `.mode` is emitted BEFORE the LOAD statements so the
+        # LOAD's "Success" reply is captured in the same output
+        # format, keeping the per-target filter set uniform.
         case "$target" in
             sqlite)
                 printf '.mode list\n.headers off\n.separator |\n'
                 ;;
-            duckdb|ducklink)
+            duckdb)
                 printf '.mode csv\n.headers off\n'
                 ;;
+            ducklink)
+                printf '.mode csv\n'
+                ;;
         esac
+        printf '%s\n' "$loader"
         cat "$sql_input"
     } > "$sql_with_loader"
 
@@ -306,20 +329,55 @@ for sql in "$case_dir"/*.sql; do
     # (clash warnings, debug eprintln) that bleeds onto stdout
     # via the CLI's stderr merge — `[shim-*]` is the convention
     # the codegens use; `<crate>-duckdb-bridge:` is the legacy
-    # prefix from aggregates_rs. Tests assert on actual query
-    # output, not bridge chatter.
+    # prefix from aggregates_rs. For ducklink we additionally
+    # strip:
+    #   - `D> ` / `...> ` REPL prompts (written to stdout even
+    #     when stdin is piped; can appear inline mid-line)
+    #   - `[extension-manager]` / `[extension-runtime:*]` /
+    #     `[sub-ext]` / `[duckdb-core]` host-side registration
+    #     chatter (postgis monolith registers ~1100 functions
+    #     with per-line trace)
+    #   - LOAD's table-mode reply (`+---+`, `| Success |`) when
+    #     it slips through before `.mode csv` takes effect
+    #   - CSV column-header lines emitted before each result
+    #     (the ducklink CLI has no `.headers off`; the postgis
+    #     smoke cases return single-column numeric results, so
+    #     keeping only lines that match a pure numeric / signed
+    #     numeric pattern reliably drops the headers).
+    # Tests assert on actual query output, not bridge chatter.
     norm_actual="$(mktemp -t bridge-smoke.XXXXXX.norm)"
     sed -e 's/[[:space:]]*$//' \
+        -e 's/D> //g' \
+        -e 's/\.\.\.> //g' \
         -e '/^\[shim-/d' \
+        -e '/^\[extension-/d' \
+        -e '/^\[sub-ext/d' \
+        -e '/^\[duckdb-core\]/d' \
         -e '/-duckdb-bridge: /d' \
         -e '/-sqlite-bridge: /d' \
         -e '/^loaded [a-z]*: [0-9]* scalar/d' \
         "$actual" \
-        | awk 'NR==1 || /./{print prev} {prev=$0} END{if(prev!="") print prev}' \
+        | awk '{ lines[NR]=$0; if (NF) last=NR } END { for (i=1; i<=last; i++) print lines[i] }' \
         > "$norm_actual"
+    if [[ "$target" == "ducklink" ]] \
+        && awk 'NF && !/^-?[0-9]+(\.[0-9]+)?$/ { bad=1; exit } END { exit bad+0 }' "$expected"
+    then
+        # ducklink CSV mode emits a header line per query and there
+        # is no ".headers off" on the WASI guest CLI. When the
+        # expected file is entirely numeric, we can whitelist data
+        # lines and strip everything else — CSV column headers,
+        # `+---+` / `| Success |` LOAD borders, and any leftover
+        # diagnostic chatter that slipped past the prefix filters.
+        # Cases with non-numeric expected output (e.g., text or
+        # error messages in postgis-duckdb-only) fall through and
+        # rely on the noise-prefix filter alone.
+        filtered="$(mktemp -t bridge-smoke.XXXXXX.filt)"
+        grep -E '^-?[0-9]+(\.[0-9]+)?$' "$norm_actual" > "$filtered" || true
+        mv "$filtered" "$norm_actual"
+    fi
     norm_expected="$(mktemp -t bridge-smoke.XXXXXX.norm)"
     sed -e 's/[[:space:]]*$//' "$expected" \
-        | awk 'NR==1 || /./{print prev} {prev=$0} END{if(prev!="") print prev}' \
+        | awk '{ lines[NR]=$0; if (NF) last=NR } END { for (i=1; i<=last; i++) print lines[i] }' \
         > "$norm_expected"
 
     if diff -q "$norm_actual" "$norm_expected" >/dev/null 2>&1; then
