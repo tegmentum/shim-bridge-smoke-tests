@@ -338,21 +338,62 @@ for sql in "$case_dir"/*.sql; do
         # rewrite doesn't inject a stray `;` inside multi-line string
         # literals (e.g. embedded JSON with real newlines). SQL escapes an
         # embedded `'` as `''`; treat that as a stay-in-string sequence.
+        #
+        # For target=ducklink, also fold multi-line string literals into
+        # a single line with `' || chr(10) || '` concat splicing where the
+        # real newlines were. The ducklink guest CLI (wasi duckdb-cli)
+        # collapses raw newlines inside a `'...'` literal to a single
+        # space before the SQL parser sees them (verified: native duckdb
+        # `SELECT length('ab<LF>cd')` = 5 preserving LF, ducklink same
+        # query = 5 with the LF turned into a space — a wasm-side stdin
+        # buffer bug). Concat-splicing produces the same string value via
+        # a chain of function calls, sidestepping the collapse.
+        # `chr(10)` is DuckDB-specific (SQLite has `char()` only), so we
+        # gate the fold on the ducklink branch. sqlite/duckdb targets
+        # keep the legacy line-preserving behavior.
+        case "$target" in
+            ducklink) awk_fold=1 ;;
+            *)        awk_fold=0 ;;
+        esac
         sed -e 's/;[[:space:]]*/;\n/g' "$rewritten" \
-            | awk '
-BEGIN { in_str = 0; q = "\047" }
+            | awk -v fold="$awk_fold" '
+BEGIN { in_str = 0; q = "\047"; buf = "" }
 !in_str && NF == 0 { next }
 {
-    n = length($0)
+    line = $0
+    # When folding for ducklink, a newline reached while still in a
+    # string literal represents a real LF in the SQL string value.
+    # Splice a quote-close, chr(10) concat, quote-open sequence in
+    # place of the raw newline so the guest CLI (which collapses raw
+    # LFs inside quotes to a space) still receives the correct char.
+    if (fold && in_str && buf != "") {
+        buf = buf q " || chr(10) || " q
+    }
+    n = length(line)
     for (i = 1; i <= n; i++) {
-        c = substr($0, i, 1)
+        c = substr(line, i, 1)
         if (c == q) {
-            if (in_str && i < n && substr($0, i+1, 1) == q) { i++; continue }
+            if (in_str && i < n && substr(line, i+1, 1) == q) { i++; continue }
             in_str = !in_str
         }
     }
-    if (!in_str && $0 !~ /;[[:space:]]*$/) $0 = $0 ";"
-    print
+    if (fold) {
+        buf = buf line
+        if (!in_str) {
+            if (buf !~ /;[[:space:]]*$/) buf = buf ";"
+            print buf
+            buf = ""
+        }
+    } else {
+        if (!in_str && line !~ /;[[:space:]]*$/) line = line ";"
+        print line
+    }
+}
+END {
+    if (fold && buf != "") {
+        if (buf !~ /;[[:space:]]*$/) buf = buf ";"
+        print buf
+    }
 }' \
             > "$rewritten_norm"
         mv "$rewritten_norm" "$rewritten"
