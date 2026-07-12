@@ -126,7 +126,7 @@ before landing.
 
 ## `02-spatial-index` — SQL-callable spatial-index UDTF surface missing across BOTH extensions
 
-**Failure**: case does
+**Failure** (re-confirmed 2026-07-11 investigator sweep): case does
 `SET VARIABLE h = (SELECT mobilitydb_spatial_index_build(id, wkb) FROM pts);`
 followed by
 `SELECT q.item_id FROM mobilitydb_spatial_index_query_envelope(getvariable('h'), 0.0, 0.0, 1.0, 1.0) q;`.
@@ -135,10 +135,28 @@ registered anywhere. Empty output, no rows.
 
 **Confirmed the sibling `postgis-duckdb-only/03-spatial-index.sql` also
 fails** — same SQL shape with `postgis_spatial_index_*` names — so the
-gap spans BOTH extensions. Fix the postgis side first (its case is
-older, has ducklink docs at `~/git/ducklink/docs/postgis-mobilitydb-integration.md:296-300`
-that already document the intended surface); the mobilitydb wiring
-mirrors it.
+gap spans BOTH extensions.
+
+### 2026-07-11 sharpening: the postgis Guest impl is NOT a portable reference
+
+The postgis `spatial_index::Guest` impl at
+`~/git/datafission/extensions/postgis/src/lib.rs:32476-32568` implements
+only the PLANNER-visible datafission
+`spatial-index-plugin/spatial-index@1.0.0` interface, which the host
+invokes when it processes `CREATE INDEX … USING spatial`. It is NOT
+SQL-callable. The auto-wire at
+`~/git/datalink/crates/datalink-shim-datafission-emit/src/emit_lib.rs:709-723,
+1235-1335` emits that Guest impl when the shim imports
+`postgis:wasm/postgis-spatial-index`, and does NOT emit any aggregate or
+UDTF surface. Porting the postgis Guest impl to mobilitydb (add
+`import postgis:wasm/postgis-spatial-index` to mobilitydb's `world.wit`
+and let the auto-wire fire) closes ONE of the three missing pieces but
+does not make the smoke case pass — the SQL-callable aggregate + UDTF
+are still absent from BOTH sides.
+
+The three-piece work sketched below therefore still applies, and the
+"fix postgis first" plan is unchanged in shape but blocked on the two
+architectural gaps documented under **NOVEL WORK** below.
 
 **Current state — three distinct pieces are missing**:
 
@@ -219,6 +237,97 @@ the composed monolith):
 day for mobilitydb. Not tractable this tranche. Postgis case
 `03-spatial-index` is the natural first target — same shape and
 better-documented WIT surface.
+
+### NOVEL WORK required before either side can land
+
+Two architectural gaps make this NOT a "port the pattern" job:
+
+**Gap 1 — the datafission aggregate accumulator is single-column.** The
+current codegen at
+`~/git/datalink/crates/datalink-shim-datafission-emit/src/emit_lib.rs:1764-1790`
+emits `accumulate(handle, value: ScalarValue)` with a hard-coded
+`ScalarValue::Binary` / `Utf8` guard — one BINARY per row. But
+`postgis_spatial_index_build(id, wkb)` is a 2-column streaming
+aggregate (`id: Int64`, `wkb: Binary`), not 1 streaming + N config
+extras. Neither the datafission `aggregate-function-registry@1.0.0`
+contract nor its bridge emit path supports multi-column streaming.
+Options:
+  (a) Add a `accumulate_row(handle, values: list<ScalarValue>)` method
+      to `datafission:function-plugin/aggregate-function-registry` (WIT
+      surface change, ripple through every emit + every host).
+  (b) Encode `(id, wkb)` into a single BINARY value host-side (e.g.
+      i64-length-prefix framing) and unpack inside the shim's finalize
+      arm. Doesn't require a WIT change but adds a per-case wire.
+      contract; the codegen would need a new shape flag like
+      `accumulator_kind = "pair_id_wkb"` to route these correctly.
+
+**Gap 2 — no session-handle registry exists on the provider side.** The
+ducklink CBOR dispatch layer (`datalink-shim-duckdb-dynlink-emit`)
+runs everything through per-call CBOR round-trips to the monolith
+provider. To turn `spatial_index_build` into a SQL aggregate that
+returns a `u64` handle usable later, the provider (either
+`postgis-monolith-provider.wasm` or `mobilitydb-monolith-provider.wasm`)
+would need:
+  - A `HandleRegistry<u64, Arc<dyn SpatialIndex>>` living inside the
+    provider component (thread-local since wasm is single-threaded).
+  - A `spatial-index-build(item_ids: list<u64>, wkbs: list<list<u8>>) ->
+    u64` CBOR method that builds via `pg_strtree::create_index +
+    insert_wkb + build` and parks the handle.
+  - A `spatial-index-query-envelope(handle: u64, minx, miny, maxx, maxy)
+    -> list<u64>` CBOR method that fetches from the registry and calls
+    `pg_strtree::query_envelope`.
+None of this exists today: `~/git/postgis-wasm/src/spatial_index.rs`
+only implements the Guest impl (`impl spatial_index::Guest`), not a
+CBOR-callable session-handle build path. Grep confirms zero hits for
+`store_index` / `NEXT_HANDLE` / `HandleRegistry` in either provider
+tree.
+
+There IS a working reference implementation in the ARCHIVED
+`~/git/ducklink-shim-codegen/src/emit/mod.rs:2455-2650`, but that
+emits a NATIVE DuckDB extension (writes directly to `libduckdb_sys`)
+that consumes `datafission_index::spatial::build_spatial_index` from a
+same-process crate. It doesn't work in the current wasm-composed
+ducklink chain — the wac-plug monolith runs entirely in wasm with no
+shared in-process registry.
+
+**Recommended sequence** (2-3 days end-to-end, spans 5 repos):
+
+1. `~/git/postgis-wasm`: add a session-handle registry + two CBOR
+   methods (`spatial-index-build`, `spatial-index-query-envelope`) to
+   the postgis provider crate. New WIT stanzas need to be added to a
+   new interface `postgis:wasm/postgis-spatial-index-session` (or
+   extend the existing `postgis-spatial-index` interface with the
+   session ops). Rebuild + recompose the monolith provider.
+2. `~/git/mobilitydb-wasm`: composed monolith already includes
+   postgis-wasm — the same CBOR methods surface through the composed
+   provider without a mobilitydb-side change.
+3. `~/git/shim-interface-core` + `extract-*-interface`: extend the
+   interface DB shape with an `aggregate_kind` column that carries
+   `spatial_index_build` as a discriminator, and equivalent for UDTFs.
+   Re-extract `postgis-interface.sqlite` and
+   `mobilitydb-interface.sqlite`.
+4. `~/git/datalink`: extend
+   `datalink-shim-duckdb-dynlink-emit::emit_dynlink` to detect the new
+   `aggregate_kind = "spatial_index_build"` (and matching UDTF kind)
+   and emit a specialized dispatch arm that CBOR-encodes the (id, wkb)
+   pair-list into the provider's `spatial-index-build` method.
+5. Regenerate `postgis-ducklink-bridge` + `mobilitydb-ducklink-bridge`,
+   force-push tegmentum, re-vendor into datafission.
+6. Verify with the two smoke cases.
+
+Datafission `extensions/mobilitydb/src/lib.rs:49451-49510` (Guest impl
+stub) stays as-is until step 3 also wires the planner-side Guest impl
+via the same import trick (add
+`import postgis:wasm/postgis-spatial-index` to mobilitydb's
+`world.wit`). That's a nice-to-have for a future `CREATE INDEX …
+USING spatial` on `mobilitydb` catalog tables and does NOT gate the
+smoke case, which is aggregate + UDTF only.
+
+**STOPPED here** (2026-07-11 sub-agent). No commits landed. The
+`spatial_index::Guest` stub at `mobilitydb/src/lib.rs:49451-49510`
+remains — porting the postgis Guest impl into mobilitydb is one
+commit's worth of work but doesn't move the smoke case, so it was
+left untouched to avoid noise in a partial landing.
 
 ## `10-stindex` — `stindex_count_in_stbox` signature mismatch (JSON vs u32-prefixed BLOB)
 
