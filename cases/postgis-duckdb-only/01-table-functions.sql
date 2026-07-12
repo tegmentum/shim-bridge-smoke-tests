@@ -16,4 +16,4 @@ SELECT COUNT(*) FROM ST_Dump(ST_GeomFromText('MULTIPOINT(0 0,1 1,2 2)'));
 
 -- ST_Subdivide returns at least one piece for a simple polygon.
 SELECT CASE WHEN COUNT(*) >= 1 THEN 1 ELSE 0 END
-FROM ST_Subdivide(ST_GeomFromText('POLYGON((0 0,10 0,10 10,0 10,0 0))'));
+FROM ST_Subdivide(ST_GeomFromText('POLYGON((0 0,10 0,10 10,0 10,0 0))'), 256);

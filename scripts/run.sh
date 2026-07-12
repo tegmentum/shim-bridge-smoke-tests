@@ -473,11 +473,15 @@ END {
     norm_actual="$(mktemp -t bridge-smoke.XXXXXX.norm)"
     sed -e 's/[[:space:]]*$//' \
         -e 's/D> //g' \
+        -e 's/D>$//' \
         -e 's/\.\.\.> //g' \
+        -e 's/\.\.\.>$//' \
         -e '/^\[shim-/d' \
         -e '/^\[extension-/d' \
         -e '/^\[sub-ext/d' \
         -e '/^\[duckdb-core\]/d' \
+        -e '/^\[prefix\]/d' \
+        -e '/^\[compose-dynlink\]/d' \
         -e '/-duckdb-bridge: /d' \
         -e '/-sqlite-bridge: /d' \
         -e '/^loaded /d' \
