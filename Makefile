@@ -480,3 +480,35 @@ synthetic-mutating:
 	   $(SYNTHETIC_MUTATING_BRIDGE) \
 	   $(SYNTHETIC_MUTATING_SHIM) \
 	   cases/synthetic-mutating
+
+# ---------------------------------------------------------------
+# Synthetic mutating-vtab (provider-envelope path).
+#
+# ~/git/synthetic-mutating-vtab-provider is the sibling of the
+# bridge above — a compose:dynlink PROVIDER that exports
+# `compose:dynlink/endpoint` and handles every scalar / vtab /
+# vtab-update method inline over the CBOR envelope. This covers
+# the symmetric half of sqlink-host's mutating-vtab dispatch tier
+# (the `try_provider_invoke("vtab-update.*", ...)` path at
+# host/src/lib.rs:8611) that the bridge case above cannot exercise.
+#
+# The provider's filename doesn't end in `_bridge_dynlink.wasm`, so
+# scripts/run.sh's `*.wasm` branch calls
+# `sqlink_load_ext(hint, path)` with the absolute path. sqlink-host's
+# `is_provider = true` gate (exports_endpoint(component)) then routes
+# the load onto the resident wasm-component provider path —
+# `describe` returns the manifest, `handle` services every subsequent
+# dispatch. Both bridge_path and shim_path slots point at the
+# provider itself: run.sh's shim slot is set as an env var that this
+# provider never reads (there is no shim to compose into a monolithic
+# provider — this crate IS the provider).
+# ---------------------------------------------------------------
+SYNTHETIC_MUTATING_PROVIDER ?= $(HOME)/git/synthetic-mutating-vtab-provider/target/wasm32-wasip2/release/synthetic_mutating_provider.wasm
+
+.PHONY: synthetic-mutating-provider
+synthetic-mutating-provider:
+	@echo "=== synthetic-mutating provider (mutating-vtab via provider envelope) ==="
+	@bash scripts/run.sh sqlite \
+	   $(SYNTHETIC_MUTATING_PROVIDER) \
+	   $(SYNTHETIC_MUTATING_PROVIDER) \
+	   cases/synthetic-mutating-provider
