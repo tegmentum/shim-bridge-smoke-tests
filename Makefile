@@ -452,3 +452,31 @@ timescaledb-per-sub: \
     timescale_toolkit_categorical-sqlink timescale_toolkit_categorical-ducklink \
     timescale_toolkit_timevector-sqlink timescale_toolkit_timevector-ducklink \
     timescale_compression-sqlink timescale_compression-ducklink
+
+# ---------------------------------------------------------------
+# Synthetic mutating-vtab smoke.
+#
+# ~/git/synthetic-mutating-vtab-bridge is a hand-written dynlink
+# bridge that advertises a single eponymous vtab `kv_store` with
+# `mutable: true`. Its purpose is to exercise sqlink-host's
+# mutating-vtab dispatch tier — xUpdate + xBegin/xCommit/xRollback
+# + xSavepoint/xRelease/xRollbackTo — end-to-end, since no
+# production bridge (postgis/mobilitydb/timescaledb) advertises a
+# mutable vtab today.
+#
+# The bridge never actually invokes `compose:dynlink/linker`, but
+# sqlink-host still registers a prebuilt as its
+# `<name>-composed` provider at LOAD time. Any valid wasm-
+# component satisfies the registration; we reuse the small
+# timescaledb-compression provider (2 MB) as a stand-in.
+# ---------------------------------------------------------------
+SYNTHETIC_MUTATING_BRIDGE ?= $(HOME)/git/synthetic-mutating-vtab-bridge/target/wasm32-wasip2/release/synthetic_mutating_bridge_dynlink.wasm
+SYNTHETIC_MUTATING_SHIM   ?= $(HOME)/git/datafission/extensions/timescaledb/deps/timescaledb-compression-provider-composed.wasm
+
+.PHONY: synthetic-mutating
+synthetic-mutating:
+	@echo "=== synthetic-mutating × sqlink (mutating-vtab dispatch) ==="
+	@bash scripts/run.sh sqlite \
+	   $(SYNTHETIC_MUTATING_BRIDGE) \
+	   $(SYNTHETIC_MUTATING_SHIM) \
+	   cases/synthetic-mutating
