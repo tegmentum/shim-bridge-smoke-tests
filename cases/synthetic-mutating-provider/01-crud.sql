@@ -59,9 +59,22 @@ INSERT INTO kv_store(key, value) VALUES('delta', 'fourth');
 ROLLBACK;
 SELECT 1;
 
--- 9. Savepoint path — xSavepoint + xRollbackTo + xRelease.
+-- 9. Savepoint path — xSavepoint + xRollbackTo + xRelease. The
+--    provider runs as one resident wasm-component store, so read
+--    and write share the same linear memory; assert the write is
+--    visible while the savepoint is open and gone after ROLLBACK TO.
+--    Requires MODULE_MUTABLE.iVersion == 2; on v1 the SAVEPOINT /
+--    ROLLBACK TO / RELEASE dispatch is a silent no-op at the vtab
+--    layer. Also wrapped in BEGIN/COMMIT — SQLite has an
+--    autocommit optimization that skips SAVEPOINT allocation when
+--    `autoCommit && nVdbeWrite == 0`; the surrounding transaction
+--    keeps the savepoint real.
+BEGIN;
 SAVEPOINT sp1;
 INSERT INTO kv_store(key, value) VALUES('epsilon', 'fifth');
+SELECT CASE WHEN (SELECT value FROM kv_store WHERE key = 'epsilon') = 'fifth' THEN 1 ELSE 0 END;
 ROLLBACK TO sp1;
+SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM kv_store WHERE key = 'epsilon') THEN 1 ELSE 0 END;
 RELEASE sp1;
 SELECT 1;
+COMMIT;

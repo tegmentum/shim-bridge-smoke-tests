@@ -3,6 +3,9 @@
 --   * xUpdate INSERT / UPDATE / DELETE via SQL DML
 --   * xBegin / xCommit  via BEGIN + COMMIT
 --   * xRollback         via BEGIN + ROLLBACK
+--   * xSavepoint / xRelease / xRollbackTo via SAVEPOINT / RELEASE
+--     / ROLLBACK TO (requires MODULE_MUTABLE.iVersion >= 2 —
+--     sqlink-extension/src/vtab.rs)
 --   * xConnect / xBestIndex / xFilter / xNext / xColumn / xRowid /
 --     xFetchBatch through the SAME wasm instance that services
 --     xUpdate — so writes are observable to subsequent reads within
@@ -20,18 +23,6 @@
 -- linear memory and could not see the writes; this file's `SELECT
 -- count(*)` / `SELECT value WHERE ...` assertions would have
 -- returned zero rows.
---
--- Note: SAVEPOINT / RELEASE / ROLLBACK TO coverage is
--- intentionally OMITTED here despite the mutating world exporting
--- xSavepoint / xRelease / xRollbackTo. sqlink-extension's
--- `MODULE_MUTABLE` / `MODULE_MUTABLE_EPONYMOUS` module templates
--- declare `iVersion = 1` (sqlink-extension/src/vtab.rs:969,995).
--- SQLite dispatches xSavepoint / xRelease / xRollbackTo only when
--- `iVersion >= 2`, so those callbacks never reach the guest today
--- and their smoke coverage would test SQLite's implicit-txn
--- fallback rather than the intended dispatch tier. Follow-up:
--- bump iVersion to 2 and add read-after-write savepoint
--- assertions here.
 --
 -- Each `SELECT` returns 1 on success. See `.expected`.
 
@@ -79,3 +70,27 @@ SELECT CASE WHEN (SELECT count(*) FROM kv_store) = 3 THEN 1 ELSE 0 END;
 ROLLBACK;
 SELECT CASE WHEN (SELECT count(*) FROM kv_store) = 2 THEN 1 ELSE 0 END;
 SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM kv_store WHERE key = 'delta') THEN 1 ELSE 0 END;
+
+-- 8. Savepoint path — xSavepoint / xRollbackTo / xRelease. The
+--    write is visible while the savepoint is open, gone after
+--    ROLLBACK TO, and RELEASE of the (empty) savepoint completes
+--    cleanly. Requires MODULE_MUTABLE.iVersion == 2; on v1 the
+--    xRollbackTo dispatch would be a silent no-op (SQLite skips
+--    the callback and the guest never rewinds the shadow view).
+--
+--    Wrapped in explicit BEGIN/COMMIT: SQLite has an autocommit
+--    optimization that turns SAVEPOINT into a no-op when
+--    `autoCommit && nVdbeWrite == 0` — i.e. a bare `SAVEPOINT sp1;`
+--    at the top level of an autocommitting session doesn't
+--    actually allocate a savepoint, and the subsequent ROLLBACK TO
+--    then errors with "no such savepoint". The explicit BEGIN
+--    turns off autocommit so the savepoint is real.
+BEGIN;
+SAVEPOINT sp1;
+INSERT INTO kv_store(key, value) VALUES('epsilon', 'fifth');
+SELECT CASE WHEN (SELECT value FROM kv_store WHERE key = 'epsilon') = 'fifth' THEN 1 ELSE 0 END;
+ROLLBACK TO sp1;
+SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM kv_store WHERE key = 'epsilon') THEN 1 ELSE 0 END;
+RELEASE sp1;
+SELECT CASE WHEN (SELECT count(*) FROM kv_store) = 2 THEN 1 ELSE 0 END;
+COMMIT;
