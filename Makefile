@@ -512,3 +512,58 @@ synthetic-mutating-provider:
 	   $(SYNTHETIC_MUTATING_PROVIDER) \
 	   $(SYNTHETIC_MUTATING_PROVIDER) \
 	   cases/synthetic-mutating-provider
+
+# ---------------------------------------------------------------
+# Synthetic mutating-storage — ducklink side.
+#
+# ~/git/synthetic-mutating-vtab-ducklink-bridge is the ducklink
+# counterpart of ~/git/synthetic-mutating-vtab-bridge. Exports the
+# full `duckdb-extension-storage-write` surface at
+# duckdb:extension@4.0.0 (guest + callback-dispatch +
+# storage-dispatch + storage-write-dispatch) backed by the same
+# in-guest Mutex<KvState> as the sqlink bridge. The ducklink CLI
+# drives LOAD -> guest.load() (calls storage.register-storage
+# with ATTACH TYPE `synthetic_mutating`) -> ATTACH ... (TYPE
+# synthetic_mutating) -> storage-dispatch/-write-dispatch on
+# CREATE / INSERT / SELECT round-trip.
+#
+# The bridge is self-contained (no external provider), so the
+# `shim` slot in run.sh's argv is set to the bridge itself: the
+# filename ends in `_bridge_dynlink.wasm`, so run.sh's ducklink
+# branch takes the sub-ext dynlink path and wires the bridge as
+# both DUCKLINK_SUB_EXT_BRIDGES and DUCKLINK_SUB_EXT_PREBUILT
+# (the "composed provider" registration is a required side-effect
+# of the dynlink path even when the bridge doesn't actually route
+# through the composed provider at runtime).
+#
+# The case SQL (`cases/synthetic-mutating-ducklink/01-crud.sql`)
+# intentionally omits several features the sqlink synthetic case
+# uses; see the case file for the full rationale:
+#   * no `--` line comments in the SQL body: the ducklink guest
+#     duckdb-cli's line parser treats a `-- comment` line as an
+#     open statement and consumes the NEXT statement into it.
+#   * no `SELECT count(*)`: routes through the empty-projection
+#     scan-fill path where duckdb-wasm's Rust core mis-sizes the
+#     output vector iteration and mis-writes into a ROWID/INT64
+#     slot. Substituted with `count(value)`.
+#   * no `UPDATE` / `DELETE`: duckdb-wasm's WasmSchemaEntry-backed
+#     tables don't pass DuckDB's `Bind(UpdateStatement)` /
+#     `Bind(DeleteStatement)` "base table" check
+#     ("Can only update base table"). Both arms of the write
+#     dispatch tier are still exercised end-to-end by
+#     `storage-boundary-test/tests/write_boundary.rs` which drives
+#     the WIT trampolines directly.
+#   * no `SAVEPOINT` / `RELEASE` / `ROLLBACK TO`: DuckDB's
+#     TransactionManager doesn't expose SAVEPOINTs the same way
+#     SQLite's vtab-update does, so the bridge intentionally
+#     omits them.
+# ---------------------------------------------------------------
+SYNTHETIC_MUTATING_DUCKLINK_BRIDGE ?= $(HOME)/git/synthetic-mutating-vtab-ducklink-bridge/target/wasm32-wasip2/release/synthetic_mutating_ducklink_bridge_dynlink.wasm
+
+.PHONY: synthetic-mutating-ducklink
+synthetic-mutating-ducklink:
+	@echo "=== synthetic-mutating × ducklink (full-stack storage bridge) ==="
+	@bash scripts/run.sh ducklink \
+	   $(SYNTHETIC_MUTATING_DUCKLINK_BRIDGE) \
+	   $(SYNTHETIC_MUTATING_DUCKLINK_BRIDGE) \
+	   cases/synthetic-mutating-ducklink
