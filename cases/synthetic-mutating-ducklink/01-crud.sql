@@ -21,3 +21,10 @@ SELECT CASE WHEN (SELECT count(value) FROM kv.kv_store) = 4 THEN 1 ELSE 0 END;
 ROLLBACK;
 SELECT CASE WHEN (SELECT count(value) FROM kv.kv_store) = 3 THEN 1 ELSE 0 END;
 SELECT CASE WHEN NOT EXISTS (SELECT value FROM kv.kv_store WHERE key = 'delta') THEN 1 ELSE 0 END;
+-- count(*) with zero-column projection: DuckDB requests only cardinality
+-- from the storage scan (projection = []). Previously tripped
+-- `Expected vector of type VARCHAR, but found vector of type INT64` at
+-- duckdb-wasm's empty-projection scan-fill loop; now honored (empty
+-- projection -> zero column_types, fill bounded by
+-- duckdb_data_chunk_get_column_count).
+SELECT CASE WHEN (SELECT count(*) FROM kv.kv_store) = 3 THEN 1 ELSE 0 END;
