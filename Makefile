@@ -537,22 +537,22 @@ synthetic-mutating-provider:
 # through the composed provider at runtime).
 #
 # The case SQL (`cases/synthetic-mutating-ducklink/01-crud.sql`)
-# intentionally omits several features the sqlink synthetic case
-# uses; see the case file for the full rationale:
-#   * no `--` line comments in the SQL body: the ducklink guest
-#     duckdb-cli's line parser treats a `-- comment` line as an
-#     open statement and consumes the NEXT statement into it.
-#   * no `SELECT count(*)`: routes through the empty-projection
-#     scan-fill path where duckdb-wasm's Rust core mis-sizes the
-#     output vector iteration and mis-writes into a ROWID/INT64
-#     slot. Substituted with `count(value)`.
-#   * no `UPDATE` / `DELETE`: duckdb-wasm's WasmSchemaEntry-backed
-#     tables don't pass DuckDB's `Bind(UpdateStatement)` /
-#     `Bind(DeleteStatement)` "base table" check
-#     ("Can only update base table"). Both arms of the write
-#     dispatch tier are still exercised end-to-end by
-#     `storage-boundary-test/tests/write_boundary.rs` which drives
-#     the WIT trampolines directly.
+# now covers the full R/W matrix. Notes on what is (and isn't) here:
+#   * `--` line comments IN THE SQL BODY: kept in-band; recent
+#     ducklink CLI (feat/cli-comment-parser-fix e0f2ae7) preserves
+#     line breaks when joining multi-line SQL input, so a
+#     `-- comment` line no longer eats the NEXT statement.
+#   * `SELECT count(*)`: works after the empty-projection scan-fill
+#     fix (2d06ade) that bounds fill by
+#     duckdb_data_chunk_get_column_count.
+#   * `UPDATE` / `DELETE` by predicate: the WIT contract now carries
+#     `wants-rowid` on scan-request + `updated-columns` on
+#     update-rows. The C++ WasmScanInitGlobal captures rowid slots
+#     from `column_ids`; scan-fill routes the guest's trailing s64
+#     rowid cell into the DuckDB output; WasmPhysicalUpdate::Sink
+#     forwards LogicalUpdate::columns as the updated-columns wire.
+#     Boundary coverage of the same round-trip lives at
+#     `storage-boundary-test/tests/write_boundary.rs`.
 #   * no `SAVEPOINT` / `RELEASE` / `ROLLBACK TO`: DuckDB's
 #     TransactionManager doesn't expose SAVEPOINTs the same way
 #     SQLite's vtab-update does, so the bridge intentionally
